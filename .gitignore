@@ -1,0 +1,3 @@
+cds_s3_exporter
+bin/**
+*.tar.gz
