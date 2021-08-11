@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -11,8 +12,10 @@ import (
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
+	yaml "gopkg.in/yaml.v2"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
@@ -65,6 +68,13 @@ type Exporter struct {
 	bucket string
 	prefix string
 	svc    s3iface.S3API
+}
+
+type Config struct {
+	EndpointUrl  string `yaml:"endpoint_url"`
+	AwsAccessKey string `yaml:"access_key"`
+	AwsSecretKey string `yaml:"secret_key"`
+	UseSSL       bool   `yaml:"use_ssl"`
 }
 
 // Describe all the metrics we export
@@ -206,16 +216,34 @@ func init() {
 	prometheus.MustRegister(version.NewCollector(namespace + "_exporter"))
 }
 
+func processError(err error) {
+	fmt.Println(err)
+	os.Exit(2)
+}
+
+func readFile(confFile string, cfg *Config) {
+	f, err := os.Open(confFile)
+	if err != nil {
+		processError(err)
+	}
+	defer f.Close()
+
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(cfg)
+	if err != nil {
+		processError(err)
+	}
+
+}
+
 func main() {
 	var (
-		app            = kingpin.New(namespace+"_exporter", "Export metrics for CDS S3").DefaultEnvars()
-		listenAddress  = app.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
-		metricsPath    = app.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
-		probePath      = app.Flag("web.probe-path", "Path under which to expose the probe endpoint").Default("/probe").String()
-		discoveryPath  = app.Flag("web.discovery-path", "Path under which to expose service discovery").Default("/discovery").String()
-		endpointURL    = app.Flag("s3.endpoint-url", "Custom endpoint URL").Default("").String()
-		disableSSL     = app.Flag("s3.disable-ssl", "Custom disable SSL").Bool()
-		forcePathStyle = app.Flag("s3.force-path-style", "Custom force path style").Bool()
+		app           = kingpin.New(namespace+"_exporter", "Export metrics for CDS S3-compatible storage").DefaultEnvars()
+		listenAddress = app.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
+		metricsPath   = app.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
+		probePath     = app.Flag("web.probe-path", "Path under which to expose the probe endpoint").Default("/probe").String()
+		discoveryPath = app.Flag("web.discovery-path", "Path under which to expose service discovery").Default("/discovery").String()
+		expConfigPath = app.Flag("exporter-config-file", "Path to exporter config file").Default("./config.yml").String()
 	)
 
 	log.AddFlags(app)
@@ -225,6 +253,12 @@ func main() {
 
 	var sess *session.Session
 	var err error
+	var forcePath bool
+	var exporterConfig Config
+
+	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
+	readFile(*expConfigPath, &exporterConfig)
+	log.Infof("%v", &exporterConfig)
 
 	sess, err = session.NewSession()
 	if err != nil {
@@ -232,12 +266,11 @@ func main() {
 	}
 
 	cfg := aws.NewConfig()
-	if *endpointURL != "" {
-		cfg.WithEndpoint(*endpointURL)
-	}
 
-	cfg.WithDisableSSL(*disableSSL)
-	cfg.WithS3ForcePathStyle(*forcePathStyle)
+	cfg.WithCredentials(awsCreds)
+	cfg.WithEndpoint(exporterConfig.EndpointUrl)
+	cfg.WithDisableSSL(exporterConfig.UseSSL)
+	cfg.WithS3ForcePathStyle(forcePath)
 
 	svc := s3.New(sess, cfg)
 
