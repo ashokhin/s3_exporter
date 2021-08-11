@@ -1,10 +1,10 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,44 +29,53 @@ var (
 	s3ListSuccess = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "list_success"),
 		"If the ListObjects operation was a success",
-		[]string{"bucket", "prefix"}, nil,
+		[]string{"bucket"}, nil,
 	)
 	s3ListDuration = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "list_duration_seconds"),
 		"The total duration of the list operation",
-		[]string{"bucket", "prefix"}, nil,
+		[]string{"bucket"}, nil,
 	)
 	s3LastModifiedObjectDate = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "last_modified_object_date"),
 		"The last modified date of the object that was modified most recently",
-		[]string{"bucket", "prefix"}, nil,
+		[]string{"bucket"}, nil,
 	)
 	s3LastModifiedObjectSize = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "last_modified_object_size_bytes"),
 		"The size of the object that was modified most recently",
-		[]string{"bucket", "prefix"}, nil,
+		[]string{"bucket"}, nil,
 	)
 	s3ObjectTotal = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "", "objects"),
-		"The total number of objects for the bucket/prefix combination",
-		[]string{"bucket", "prefix"}, nil,
+		prometheus.BuildFQName(namespace, "", "objects_total"),
+		"The total number of objects for the bucket",
+		[]string{"bucket"}, nil,
 	)
 	s3SumSize = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "objects_size_sum_bytes"),
 		"The total size of all objects summed",
-		[]string{"bucket", "prefix"}, nil,
+		[]string{"bucket"}, nil,
 	)
 	s3BiggestSize = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "biggest_object_size_bytes"),
 		"The size of the biggest object",
-		[]string{"bucket", "prefix"}, nil,
+		[]string{"bucket"}, nil,
+	)
+	s3CDSObjectTotal = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "cds_objects_total"),
+		"The total number of cds objects for the bucket",
+		[]string{"bucket", "moddate", "sin"}, nil,
+	)
+	s3CDSSize = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "cds_objects_size_sum_bytes"),
+		"The total size of all objects summed by sin and modification date",
+		[]string{"bucket", "moddate", "sin"}, nil,
 	)
 )
 
 // Exporter is our exporter type
 type Exporter struct {
 	bucket string
-	prefix string
 	svc    s3iface.S3API
 }
 
@@ -74,7 +83,7 @@ type Config struct {
 	EndpointUrl  string `yaml:"endpoint_url"`
 	AwsAccessKey string `yaml:"access_key"`
 	AwsSecretKey string `yaml:"secret_key"`
-	UseSSL       bool   `yaml:"use_ssl"`
+	DisableSSL   bool   `yaml:"disable_ssl"`
 }
 
 // Describe all the metrics we export
@@ -86,6 +95,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- s3ObjectTotal
 	ch <- s3SumSize
 	ch <- s3BiggestSize
+	ch <- s3CDSObjectTotal
 }
 
 // Collect metrics
@@ -95,10 +105,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	var totalSize int64
 	var biggestObjectSize int64
 	var lastObjectSize int64
+	type S3Object struct {
+		ObjectSin  string
+		ModifyDate string
+	}
+	objSize := make(map[S3Object]int64)
+	objCount := make(map[S3Object]uint16)
 
 	query := &s3.ListObjectsV2Input{
 		Bucket: &e.bucket,
-		Prefix: &e.prefix,
 	}
 
 	// Continue making requests until we've listed and compared the date of every object
@@ -108,11 +123,32 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		if err != nil {
 			log.Errorln(err)
 			ch <- prometheus.MustNewConstMetric(
-				s3ListSuccess, prometheus.GaugeValue, 0, e.bucket, e.prefix,
+				s3ListSuccess, prometheus.GaugeValue, 0, e.bucket,
 			)
 			return
 		}
 		for _, item := range resp.Contents {
+			objectName := strings.ToLower(*item.Key)
+			if !(strings.Contains(objectName, "/")) || !(strings.HasSuffix(objectName, ".cds")) {
+				log.Debugf("Object '%v' not match. Skip.", objectName)
+				continue
+			}
+			t := *item.LastModified
+			modDate := t.Format("2006.01.02")
+			re := regexp.MustCompile(`^[a-z0-9/]+_`)
+			sin := re.ReplaceAllString(objectName, ``)
+			re = regexp.MustCompile(`_.+\.cds$`)
+			sin = re.ReplaceAllString(sin, ``)
+			matched, err := regexp.MatchString(`^\d{3,5}$`, sin)
+			if matched != true {
+				log.Debugf("SIN '%v' in object: '%v' not match. Skip.", sin, objectName)
+				continue
+			}
+			if err != nil {
+				log.Errorln(err)
+			}
+			objSize[S3Object{sin, modDate}] += *item.Size
+			objCount[S3Object{sin, modDate}] += 1
 			numberOfObjects++
 			totalSize = totalSize + *item.Size
 			if item.LastModified.After(lastModified) {
@@ -128,28 +164,42 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 		query.ContinuationToken = resp.NextContinuationToken
 	}
+
+	for key, value := range objSize {
+		log.Debugf("SIN: %v, Date: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, value)
+		ch <- prometheus.MustNewConstMetric(
+			s3CDSSize, prometheus.GaugeValue, float64(value), e.bucket, key.ModifyDate, key.ObjectSin,
+		)
+	}
+
+	for key, value := range objCount {
+		ch <- prometheus.MustNewConstMetric(
+			s3CDSObjectTotal, prometheus.GaugeValue, float64(value), e.bucket, key.ModifyDate, key.ObjectSin,
+		)
+	}
+
 	listDuration := time.Now().Sub(startList).Seconds()
 
 	ch <- prometheus.MustNewConstMetric(
-		s3ListSuccess, prometheus.GaugeValue, 1, e.bucket, e.prefix,
+		s3ListSuccess, prometheus.GaugeValue, 1, e.bucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3ListDuration, prometheus.GaugeValue, listDuration, e.bucket, e.prefix,
+		s3ListDuration, prometheus.GaugeValue, listDuration, e.bucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.UnixNano()/1e9), e.bucket, e.prefix,
+		s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.UnixNano()/1e9), e.bucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), e.bucket, e.prefix,
+		s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), e.bucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, e.bucket, e.prefix,
+		s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, e.bucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), e.bucket, e.prefix,
+		s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), e.bucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3SumSize, prometheus.GaugeValue, float64(totalSize), e.bucket, e.prefix,
+		s3SumSize, prometheus.GaugeValue, float64(totalSize), e.bucket,
 	)
 }
 
@@ -160,11 +210,8 @@ func probeHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API) {
 		return
 	}
 
-	prefix := r.URL.Query().Get("prefix")
-
 	exporter := &Exporter{
 		bucket: bucket,
-		prefix: prefix,
 		svc:    svc,
 	}
 
@@ -176,64 +223,22 @@ func probeHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API) {
 	h.ServeHTTP(w, r)
 }
 
-type discoveryTarget struct {
-	Targets []string          `json:"targets"`
-	Labels  map[string]string `json:"labels"`
-}
-
-func discoveryHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API) {
-	result, err := svc.ListBuckets(&s3.ListBucketsInput{})
-	if err != nil {
-		log.Errorln(err)
-		http.Error(w, "error listing buckets", http.StatusInternalServerError)
-		return
-	}
-
-	targets := []discoveryTarget{}
-	for _, b := range result.Buckets {
-		name := aws.StringValue(b.Name)
-		if name != "" {
-			t := discoveryTarget{
-				Targets: []string{r.Host},
-				Labels: map[string]string{
-					"__param_bucket": name,
-				},
-			}
-			targets = append(targets, t)
-		}
-	}
-
-	data, err := json.Marshal(targets)
-	if err != nil {
-		http.Error(w, "error marshalling json", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(data)
-}
-
 func init() {
 	prometheus.MustRegister(version.NewCollector(namespace + "_exporter"))
-}
-
-func processError(err error) {
-	fmt.Println(err)
-	os.Exit(2)
 }
 
 func readFile(confFile string, cfg *Config) {
 	f, err := os.Open(confFile)
 	if err != nil {
-		processError(err)
+		log.Errorln(err)
 	}
 	defer f.Close()
 
 	decoder := yaml.NewDecoder(f)
 	err = decoder.Decode(cfg)
 	if err != nil {
-		processError(err)
+		log.Errorln(err)
 	}
-
 }
 
 func main() {
@@ -241,8 +246,7 @@ func main() {
 		app           = kingpin.New(namespace+"_exporter", "Export metrics for CDS S3-compatible storage").DefaultEnvars()
 		listenAddress = app.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
 		metricsPath   = app.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
-		probePath     = app.Flag("web.probe-path", "Path under which to expose the probe endpoint").Default("/probe").String()
-		discoveryPath = app.Flag("web.discovery-path", "Path under which to expose service discovery").Default("/discovery").String()
+		inspectPath   = app.Flag("web.inspect-path", "Path under which to expose the inspect endpoint").Default("/inspect").String()
 		expConfigPath = app.Flag("exporter-config-file", "Path to exporter config file").Default("./config.yml").String()
 	)
 
@@ -253,12 +257,13 @@ func main() {
 
 	var sess *session.Session
 	var err error
-	var forcePath bool
 	var exporterConfig Config
 
-	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
+	var forcePath bool = true
+	var awsRegion string = "us-west-1"
+
 	readFile(*expConfigPath, &exporterConfig)
-	log.Infof("%v", &exporterConfig)
+	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
 
 	sess, err = session.NewSession()
 	if err != nil {
@@ -268,8 +273,9 @@ func main() {
 	cfg := aws.NewConfig()
 
 	cfg.WithCredentials(awsCreds)
+	cfg.WithRegion(awsRegion)
 	cfg.WithEndpoint(exporterConfig.EndpointUrl)
-	cfg.WithDisableSSL(exporterConfig.UseSSL)
+	cfg.WithDisableSSL(exporterConfig.DisableSSL)
 	cfg.WithS3ForcePathStyle(forcePath)
 
 	svc := s3.New(sess, cfg)
@@ -278,20 +284,16 @@ func main() {
 	log.Infoln("Build context", version.BuildContext())
 
 	http.Handle(*metricsPath, promhttp.Handler())
-	http.HandleFunc(*probePath, func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc(*inspectPath, func(w http.ResponseWriter, r *http.Request) {
 		probeHandler(w, r, svc)
-	})
-	http.HandleFunc(*discoveryPath, func(w http.ResponseWriter, r *http.Request) {
-		discoveryHandler(w, r, svc)
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 						 <head><title>AWS CDS S3 Exporter</title></head>
 						 <body>
 						 <h1>AWS CDS S3 Exporter</h1>
-						 <p><a href="` + *probePath + `?bucket=BUCKET&prefix=PREFIX">Query metrics for objects in BUCKET that match PREFIX</a></p>
+						 <p><a href="` + *inspectPath + `?bucket=BUCKET">Query metrics for objects in BUCKET</a></p>
 						 <p><a href='` + *metricsPath + `'>Metrics</a></p>
-						 <p><a href='` + *discoveryPath + `'>Service Discovery</a></p>
 						 </body>
 						 </html>`))
 	})
