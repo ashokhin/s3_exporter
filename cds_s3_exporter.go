@@ -127,6 +127,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			)
 			return
 		}
+		reCdsPref := regexp.MustCompile(`^[a-z0-9/]+_`)
+		reCdsSuff := regexp.MustCompile(`_.+\.cds$`)
+		reCdsMatch := regexp.MustCompile(`^\d{3,5}$`)
 		for _, item := range resp.Contents {
 			objectName := strings.ToLower(*item.Key)
 			if !(strings.Contains(objectName, "/")) || !(strings.HasSuffix(objectName, ".cds")) {
@@ -135,12 +138,10 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			}
 			t := *item.LastModified
 			modDate := t.Format("2006.01.02")
-			re := regexp.MustCompile(`^[a-z0-9/]+_`)
-			sin := re.ReplaceAllString(objectName, ``)
-			re = regexp.MustCompile(`_.+\.cds$`)
-			sin = re.ReplaceAllString(sin, ``)
-			matched, err := regexp.MatchString(`^\d{3,5}$`, sin)
-			if matched != true {
+			sin := reCdsPref.ReplaceAllString(objectName, ``)
+			sin = reCdsSuff.ReplaceAllString(sin, ``)
+			matched := reCdsMatch.MatchString(sin)
+			if !matched {
 				log.Debugf("SIN '%v' in object: '%v' not match. Skip.", sin, objectName)
 				continue
 			}
@@ -178,7 +179,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		)
 	}
 
-	listDuration := time.Now().Sub(startList).Seconds()
+	listDuration := time.Since(startList).Seconds()
 
 	ch <- prometheus.MustNewConstMetric(
 		s3ListSuccess, prometheus.GaugeValue, 1, e.bucket,
@@ -264,7 +265,6 @@ func main() {
 
 	readFile(*expConfigPath, &exporterConfig)
 	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
-
 	sess, err = session.NewSession()
 	if err != nil {
 		log.Errorln("Error creating sessions ", err)
