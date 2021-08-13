@@ -2,3 +2,5 @@ endpoint_url: "127.0.0.1:8080"
 access_key: "test"
 secret_key: "test_secret"
 disable_ssl: True
+cds_bucket: "test_bucket"
+timezone: "Europe/Moscow"

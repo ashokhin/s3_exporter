@@ -48,7 +48,7 @@ var (
 	)
 	s3ObjectTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "objects_total"),
-		"The total number of objects for the bucket",
+		"The total number of objects for bucket",
 		[]string{"bucket"}, nil,
 	)
 	s3SumSize = prometheus.NewDesc(
@@ -63,27 +63,38 @@ var (
 	)
 	s3CDSObjectTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "cds_objects_total"),
-		"The total number of cds objects for the bucket",
-		[]string{"bucket", "moddate", "sin"}, nil,
+		"The total number of cds objects for bucket",
+		[]string{"bucket", "moddate", "sin", "type"}, nil,
 	)
 	s3CDSSize = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "cds_objects_size_sum_bytes"),
 		"The total size of all objects summed by sin and modification date",
-		[]string{"bucket", "moddate", "sin"}, nil,
+		[]string{"bucket", "moddate", "sin", "type"}, nil,
 	)
 )
-
-// Exporter is our exporter type
-type Exporter struct {
-	bucket string
-	svc    s3iface.S3API
-}
 
 type Config struct {
 	EndpointUrl  string `yaml:"endpoint_url"`
 	AwsAccessKey string `yaml:"access_key"`
 	AwsSecretKey string `yaml:"secret_key"`
 	DisableSSL   bool   `yaml:"disable_ssl"`
+	CdsBucket    string `yaml:"cds_bucket"`
+	Timezone     string `yaml:"timezone"`
+}
+
+func (conf *Config) set_defaults() {
+	if conf.EndpointUrl == "" {
+		conf.EndpointUrl = "127.0.0.1:8080"
+	}
+	if conf.Timezone == "" {
+		conf.Timezone = "Europe/Moscow"
+	}
+}
+
+// Exporter is our exporter type
+type Exporter struct {
+	conf Config
+	svc  s3iface.S3API
 }
 
 // Describe all the metrics we export
@@ -108,36 +119,39 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	type S3Object struct {
 		ObjectSin  string
 		ModifyDate string
+		FileType   string
 	}
 	objSize := make(map[S3Object]int64)
 	objCount := make(map[S3Object]uint16)
 
 	query := &s3.ListObjectsV2Input{
-		Bucket: &e.bucket,
+		Bucket: &e.conf.CdsBucket,
 	}
 
 	// Continue making requests until we've listed and compared the date of every object
 	startList := time.Now()
+	// Set timezone for file modification
+	timeZone, _ := time.LoadLocation(e.conf.Timezone)
+	// Create regexp template
+	reCdsPref := regexp.MustCompile(`^[a-z0-9/]+_`)
+	reCdsSuff := regexp.MustCompile(`_.+\.[cg]ds$`)
+	reCdsMatch := regexp.MustCompile(`^\d{3,5}$`)
+
 	for {
 		resp, err := e.svc.ListObjectsV2(query)
 		if err != nil {
 			log.Errorln(err)
 			ch <- prometheus.MustNewConstMetric(
-				s3ListSuccess, prometheus.GaugeValue, 0, e.bucket,
+				s3ListSuccess, prometheus.GaugeValue, 0, e.conf.CdsBucket,
 			)
 			return
 		}
-		reCdsPref := regexp.MustCompile(`^[a-z0-9/]+_`)
-		reCdsSuff := regexp.MustCompile(`_.+\.cds$`)
-		reCdsMatch := regexp.MustCompile(`^\d{3,5}$`)
 		for _, item := range resp.Contents {
 			objectName := strings.ToLower(*item.Key)
-			if !(strings.Contains(objectName, "/")) || !(strings.HasSuffix(objectName, ".cds")) {
+			if !(strings.Contains(objectName, "/")) {
 				log.Debugf("Object '%v' not match. Skip.", objectName)
 				continue
 			}
-			t := *item.LastModified
-			modDate := t.Format("2006.01.02")
 			sin := reCdsPref.ReplaceAllString(objectName, ``)
 			sin = reCdsSuff.ReplaceAllString(sin, ``)
 			matched := reCdsMatch.MatchString(sin)
@@ -145,11 +159,13 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				log.Debugf("SIN '%v' in object: '%v' not match. Skip.", sin, objectName)
 				continue
 			}
-			if err != nil {
-				log.Errorln(err)
-			}
-			objSize[S3Object{sin, modDate}] += *item.Size
-			objCount[S3Object{sin, modDate}] += 1
+			t := *item.LastModified
+			t = t.In(timeZone)
+			log.Debugf("Shift time '%v' to '%v' for object '%v'", *item.LastModified, t, objectName)
+			modDate := t.Format("2006.01.02")
+			fileType := objectName[len(objectName)-3:]
+			objSize[S3Object{sin, modDate, fileType}] += *item.Size
+			objCount[S3Object{sin, modDate, fileType}] += 1
 			numberOfObjects++
 			totalSize = totalSize + *item.Size
 			if item.LastModified.After(lastModified) {
@@ -167,53 +183,52 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	for key, value := range objSize {
-		log.Debugf("SIN: %v, Date: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, value)
+		log.Debugf("SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
 		ch <- prometheus.MustNewConstMetric(
-			s3CDSSize, prometheus.GaugeValue, float64(value), e.bucket, key.ModifyDate, key.ObjectSin,
+			s3CDSSize, prometheus.GaugeValue, float64(value), e.conf.CdsBucket, key.ModifyDate, key.ObjectSin, key.FileType,
 		)
 	}
 
 	for key, value := range objCount {
 		ch <- prometheus.MustNewConstMetric(
-			s3CDSObjectTotal, prometheus.GaugeValue, float64(value), e.bucket, key.ModifyDate, key.ObjectSin,
+			s3CDSObjectTotal, prometheus.GaugeValue, float64(value), e.conf.CdsBucket, key.ModifyDate, key.ObjectSin, key.FileType,
 		)
 	}
 
 	listDuration := time.Since(startList).Seconds()
 
 	ch <- prometheus.MustNewConstMetric(
-		s3ListSuccess, prometheus.GaugeValue, 1, e.bucket,
+		s3ListSuccess, prometheus.GaugeValue, 1, e.conf.CdsBucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3ListDuration, prometheus.GaugeValue, listDuration, e.bucket,
+		s3ListDuration, prometheus.GaugeValue, listDuration, e.conf.CdsBucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.UnixNano()/1e9), e.bucket,
+		s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.UnixNano()/1e9), e.conf.CdsBucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), e.bucket,
+		s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), e.conf.CdsBucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, e.bucket,
+		s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, e.conf.CdsBucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), e.bucket,
+		s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), e.conf.CdsBucket,
 	)
 	ch <- prometheus.MustNewConstMetric(
-		s3SumSize, prometheus.GaugeValue, float64(totalSize), e.bucket,
+		s3SumSize, prometheus.GaugeValue, float64(totalSize), e.conf.CdsBucket,
 	)
 }
 
-func probeHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API) {
-	bucket := r.URL.Query().Get("bucket")
-	if bucket == "" {
+func metricsHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API, conf Config) {
+	if conf.CdsBucket == "" {
 		http.Error(w, "bucket parameter is missing", http.StatusBadRequest)
 		return
 	}
 
 	exporter := &Exporter{
-		bucket: bucket,
-		svc:    svc,
+		conf: conf,
+		svc:  svc,
 	}
 
 	registry := prometheus.NewRegistry()
@@ -232,6 +247,7 @@ func readFile(confFile string, cfg *Config) {
 	f, err := os.Open(confFile)
 	if err != nil {
 		log.Errorln(err)
+		os.Exit(2)
 	}
 	defer f.Close()
 
@@ -239,6 +255,7 @@ func readFile(confFile string, cfg *Config) {
 	err = decoder.Decode(cfg)
 	if err != nil {
 		log.Errorln(err)
+		os.Exit(2)
 	}
 }
 
@@ -247,7 +264,6 @@ func main() {
 		app           = kingpin.New(namespace+"_exporter", "Export metrics for CDS S3-compatible storage").DefaultEnvars()
 		listenAddress = app.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
 		metricsPath   = app.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
-		inspectPath   = app.Flag("web.inspect-path", "Path under which to expose the inspect endpoint").Default("/inspect").String()
 		expConfigPath = app.Flag("exporter-config-file", "Path to exporter config file").Default("./config.yml").String()
 	)
 
@@ -264,6 +280,16 @@ func main() {
 	var awsRegion string = "us-west-1"
 
 	readFile(*expConfigPath, &exporterConfig)
+	// Fil to default when not configured in YAML
+	exporterConfig.set_defaults()
+	// Validate timezone
+	_, err = time.LoadLocation(exporterConfig.Timezone)
+	if err != nil {
+		log.Errorln("Invalid timezone:", exporterConfig.Timezone)
+		os.Exit(2)
+	} else {
+		log.Infoln("Load timezone", exporterConfig.Timezone)
+	}
 	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
 	sess, err = session.NewSession()
 	if err != nil {
@@ -283,16 +309,14 @@ func main() {
 	log.Infoln("Starting "+namespace+"_exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
 
-	http.Handle(*metricsPath, promhttp.Handler())
-	http.HandleFunc(*inspectPath, func(w http.ResponseWriter, r *http.Request) {
-		probeHandler(w, r, svc)
+	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
+		metricsHandler(w, r, svc, exporterConfig)
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 						 <head><title>AWS CDS S3 Exporter</title></head>
 						 <body>
 						 <h1>AWS CDS S3 Exporter</h1>
-						 <p><a href="` + *inspectPath + `?bucket=BUCKET">Query metrics for objects in BUCKET</a></p>
 						 <p><a href='` + *metricsPath + `'>Metrics</a></p>
 						 </body>
 						 </html>`))
