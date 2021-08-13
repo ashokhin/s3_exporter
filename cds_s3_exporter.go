@@ -63,7 +63,7 @@ var (
 	)
 	s3CDSObjectTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "cds_objects_total"),
-		"The total number of cds objects for bucket",
+		"The total number of all objects for bucket",
 		[]string{"bucket", "moddate", "sin", "type"}, nil,
 	)
 	s3CDSSize = prometheus.NewDesc(
@@ -71,15 +71,26 @@ var (
 		"The total size of all objects summed by sin and modification date",
 		[]string{"bucket", "moddate", "sin", "type"}, nil,
 	)
+	s3TriggerTotal = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "trigger_objects_total"),
+		"The total number of all objects for bucket",
+		[]string{"bucket", "moddate", "sin", "program"}, nil,
+	)
+	s3TriggerSize = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "trigger_objects_size_sum_bytes"),
+		"The total size of all objects summed by sin, program and modification date",
+		[]string{"bucket", "moddate", "sin", "program"}, nil,
+	)
 )
 
 type Config struct {
-	EndpointUrl  string `yaml:"endpoint_url"`
-	AwsAccessKey string `yaml:"access_key"`
-	AwsSecretKey string `yaml:"secret_key"`
-	DisableSSL   bool   `yaml:"disable_ssl"`
-	CdsBucket    string `yaml:"cds_bucket"`
-	Timezone     string `yaml:"timezone"`
+	EndpointUrl    string   `yaml:"endpoint_url"`
+	AwsAccessKey   string   `yaml:"access_key"`
+	AwsSecretKey   string   `yaml:"secret_key"`
+	DisableSSL     bool     `yaml:"disable_ssl"`
+	CdsBucket      string   `yaml:"cds_bucket"`
+	TriggerBuckets []string `yaml:"trigger_buckets"`
+	Timezone       string   `yaml:"timezone"`
 }
 
 func (conf *Config) set_defaults() {
@@ -111,32 +122,43 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect metrics
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	var lastModified time.Time
-	var numberOfObjects float64
-	var totalSize int64
-	var biggestObjectSize int64
-	var lastObjectSize int64
-	type S3Object struct {
+	type CdsObject struct {
 		ObjectSin  string
 		ModifyDate string
 		FileType   string
 	}
-	objSize := make(map[S3Object]int64)
-	objCount := make(map[S3Object]uint16)
 
+	type TriggerObject struct {
+		ObjectSin     string
+		ObjectProgram string
+		ModifyDate    string
+	}
+
+	var (
+		lastModified      time.Time
+		numberOfObjects   float64
+		totalSize         int64
+		biggestObjectSize int64
+		lastObjectSize    int64
+	)
+	cdsSize := make(map[CdsObject]int64)
+	cdsCount := make(map[CdsObject]uint16)
+	triggerSize := make(map[TriggerObject]int64)
+	triggerCount := make(map[TriggerObject]uint16)
+
+	// Create query
 	query := &s3.ListObjectsV2Input{
 		Bucket: &e.conf.CdsBucket,
 	}
-
-	// Continue making requests until we've listed and compared the date of every object
-	startList := time.Now()
 	// Set timezone for file modification
-	timeZone, _ := time.LoadLocation(e.conf.Timezone)
+	timezone, _ := time.LoadLocation(e.conf.Timezone)
+	// Start processing cds objects
 	// Create regexp template
 	reCdsPref := regexp.MustCompile(`^[a-z0-9/]+_`)
 	reCdsSuff := regexp.MustCompile(`_.+\.[cg]ds$`)
-	reCdsMatch := regexp.MustCompile(`^\d{3,5}$`)
-
+	reSinMatch := regexp.MustCompile(`^\d{3,5}$`)
+	// Continue making requests until we've listed and compared the date of every object
+	startList := time.Now()
 	for {
 		resp, err := e.svc.ListObjectsV2(query)
 		if err != nil {
@@ -149,23 +171,23 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		for _, item := range resp.Contents {
 			objectName := strings.ToLower(*item.Key)
 			if !(strings.Contains(objectName, "/")) {
-				log.Debugf("Object '%v' not match. Skip.", objectName)
+				log.Debugf("Object '%v' not match. Skip.\n", objectName)
 				continue
 			}
 			sin := reCdsPref.ReplaceAllString(objectName, ``)
 			sin = reCdsSuff.ReplaceAllString(sin, ``)
-			matched := reCdsMatch.MatchString(sin)
+			matched := reSinMatch.MatchString(sin)
 			if !matched {
-				log.Debugf("SIN '%v' in object: '%v' not match. Skip.", sin, objectName)
+				log.Debugf("SIN '%v' in object: '%v' not match. Skip.\n", sin, objectName)
 				continue
 			}
 			t := *item.LastModified
-			t = t.In(timeZone)
-			log.Debugf("Shift time '%v' to '%v' for object '%v'", *item.LastModified, t, objectName)
+			t = t.In(timezone)
+			log.Debugf("Shift time '%v' to '%v' for object '%v'\n", *item.LastModified, t, objectName)
 			modDate := t.Format("2006.01.02")
 			fileType := objectName[len(objectName)-3:]
-			objSize[S3Object{sin, modDate, fileType}] += *item.Size
-			objCount[S3Object{sin, modDate, fileType}] += 1
+			cdsSize[CdsObject{sin, modDate, fileType}] += *item.Size
+			cdsCount[CdsObject{sin, modDate, fileType}] += 1
 			numberOfObjects++
 			totalSize = totalSize + *item.Size
 			if item.LastModified.After(lastModified) {
@@ -182,20 +204,21 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		query.ContinuationToken = resp.NextContinuationToken
 	}
 
-	for key, value := range objSize {
+	listDuration := time.Since(startList).Seconds()
+
+	// Send all collected metrics in Prometheus registry
+	for key, value := range cdsSize {
 		log.Debugf("SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
 		ch <- prometheus.MustNewConstMetric(
 			s3CDSSize, prometheus.GaugeValue, float64(value), e.conf.CdsBucket, key.ModifyDate, key.ObjectSin, key.FileType,
 		)
 	}
 
-	for key, value := range objCount {
+	for key, value := range cdsCount {
 		ch <- prometheus.MustNewConstMetric(
 			s3CDSObjectTotal, prometheus.GaugeValue, float64(value), e.conf.CdsBucket, key.ModifyDate, key.ObjectSin, key.FileType,
 		)
 	}
-
-	listDuration := time.Since(startList).Seconds()
 
 	ch <- prometheus.MustNewConstMetric(
 		s3ListSuccess, prometheus.GaugeValue, 1, e.conf.CdsBucket,
@@ -218,6 +241,106 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		s3SumSize, prometheus.GaugeValue, float64(totalSize), e.conf.CdsBucket,
 	)
+
+	// Start processing trigger objects
+	reTrigPref := regexp.MustCompile(`^[a-z0-9]+/`)
+	for _, triggerBucket := range e.conf.TriggerBuckets {
+		triggerSize = make(map[TriggerObject]int64)
+		triggerCount = make(map[TriggerObject]uint16)
+		// Create query
+		query = &s3.ListObjectsV2Input{
+			Bucket: &triggerBucket,
+		}
+		startList = time.Now()
+		for {
+			resp, err := e.svc.ListObjectsV2(query)
+			if err != nil {
+				log.Errorln(err)
+				ch <- prometheus.MustNewConstMetric(
+					s3ListSuccess, prometheus.GaugeValue, 0, triggerBucket,
+				)
+				return
+			}
+			for _, item := range resp.Contents {
+				objectName := strings.ToLower(*item.Key)
+				if !(strings.Contains(objectName, "/")) {
+					log.Debugf("Object '%v' not match. Skip.", objectName)
+					continue
+				}
+				objectNamePart := reTrigPref.ReplaceAllString(objectName, ``)
+				objectNameSlice := strings.Split(objectNamePart, `_`)
+				sin := objectNameSlice[0]
+				matched := reSinMatch.MatchString(sin)
+				if !matched {
+					log.Debugf("SIN '%v' in trigger object: '%v' not match. Skip.", sin, objectName)
+					continue
+				}
+				program := strings.ToUpper(objectNameSlice[1])
+				// Parse string (part of name) to timestamp
+				t, err := time.Parse("200601021504", objectNameSlice[2][0:12])
+				if err != nil {
+					log.Debugf("Time string '%v' cannot be parsed to timestamp with error: '%v'", objectNameSlice[2][0:12], err)
+					continue
+				}
+				t = t.In(timezone)
+				log.Debugf("Shift time '%v' to '%v' for object '%v'", *item.LastModified, t, objectName)
+				modDate := t.Format("2006.01.02")
+				triggerSize[TriggerObject{sin, program, modDate}] += *item.Size
+				triggerCount[TriggerObject{sin, program, modDate}] += 1
+				numberOfObjects++
+				totalSize = totalSize + *item.Size
+				if item.LastModified.After(lastModified) {
+					lastModified = *item.LastModified
+					lastObjectSize = *item.Size
+				}
+				if *item.Size > biggestObjectSize {
+					biggestObjectSize = *item.Size
+				}
+			}
+			if resp.NextContinuationToken == nil {
+				break
+			}
+			query.ContinuationToken = resp.NextContinuationToken
+		}
+
+		listDuration = time.Since(startList).Seconds()
+
+		// Send all collected metrics in Prometheus registry
+		for key, value := range triggerSize {
+			log.Debugf("SIN: '%v', Program: '%v', Date: '%v', Value: '%v'\n", key.ObjectSin, key.ObjectProgram, key.ModifyDate, value)
+			ch <- prometheus.MustNewConstMetric(
+				s3TriggerSize, prometheus.GaugeValue, float64(value), triggerBucket, key.ModifyDate, key.ObjectSin, key.ObjectProgram,
+			)
+		}
+
+		for key, value := range triggerCount {
+			ch <- prometheus.MustNewConstMetric(
+				s3TriggerTotal, prometheus.GaugeValue, float64(value), triggerBucket, key.ModifyDate, key.ObjectSin, key.ObjectProgram,
+			)
+		}
+
+		ch <- prometheus.MustNewConstMetric(
+			s3ListSuccess, prometheus.GaugeValue, 1, triggerBucket,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3ListDuration, prometheus.GaugeValue, listDuration, triggerBucket,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3LastModifiedObjectDate, prometheus.GaugeValue, float64(lastModified.UnixNano()/1e9), triggerBucket,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), triggerBucket,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, triggerBucket,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), triggerBucket,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3SumSize, prometheus.GaugeValue, float64(totalSize), triggerBucket,
+		)
+	}
 }
 
 func metricsHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API, conf Config) {

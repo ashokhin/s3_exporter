@@ -1,6 +1,9 @@
 endpoint_url: "127.0.0.1:8080"
-access_key: "test"
-secret_key: "test_secret"
+access_key: "foo"
+secret_key: "bar"
 disable_ssl: True
-cds_bucket: "test_bucket"
+cds_bucket: "cds_foo"
+trigger_buckets:
+  - "triggers01_foo"
+  - "triggers02_bar"
 timezone: "Europe/Moscow"
