@@ -1,6 +1,6 @@
 dist: bin
 builds:
-  - binary: cds_s3_exporter
+  - binary: s3_exporter
     env:
       - CGO_ENABLED=0
     goos:
@@ -20,4 +20,4 @@ builds:
 release:
   github:
     owner: ashokhin
-    name: cds_s3_exporter
+    name: s3_exporter

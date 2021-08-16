@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	namespace = "cds_s3"
+	namespace = "s3"
 )
 
 var (
@@ -243,7 +243,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	// Start processing trigger objects
-	reTrigPref := regexp.MustCompile(`^[a-z0-9]+/`)
+	reTrigPref := regexp.MustCompile(`^[a-z0-9/]+_`)
 	for _, triggerBucket := range e.conf.TriggerBuckets {
 		triggerSize = make(map[TriggerObject]int64)
 		triggerCount = make(map[TriggerObject]uint16)

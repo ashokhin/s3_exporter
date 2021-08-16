@@ -1,8 +1,8 @@
 GOPATH      := $(shell go env GOPATH)
 
 BIN_DIR             ?= $(shell pwd)/bin
-BIN_NAME            ?= cds_s3_exporter$(shell go env GOEXE)
-DOCKER_IMAGE_NAME   ?= cds-s3-exporter
+BIN_NAME            ?= s3_exporter$(shell go env GOEXE)
+DOCKER_IMAGE_NAME   ?= s3-exporter
 DOCKER_IMAGE_TAG    ?= $(subst /,-,$(shell git rev-parse --abbrev-ref HEAD))
 
 # Race detector is only supported on amd64.

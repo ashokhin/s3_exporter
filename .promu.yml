@@ -1,5 +1,5 @@
 repository:
-    path: github.com/ashokhin/cds_s3_exporter
+    path: github.com/ashokhin/s3_exporter
 build:
     flags: -a -tags netgo
 

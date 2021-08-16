@@ -1,4 +1,4 @@
-module github.com/ashokhin/cds_s3_exporter
+module github.com/ashokhin/s3_exporter
 
 go 1.15
 
