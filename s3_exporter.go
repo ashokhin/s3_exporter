@@ -157,11 +157,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		cdsSize := make(map[CdsObject]int64)
 		cdsCount := make(map[CdsObject]uint16)
 
+		// Create query
+		query := &s3.ListObjectsV2Input{
+			Bucket: aws.String(cdsBucket),
+		}
+
 		for {
-			// Create query
-			query := &s3.ListObjectsV2Input{
-				Bucket: &cdsBucket,
-			}
 			resp, err := e.svc.ListObjectsV2(query)
 			if err != nil {
 				log.Errorln(err)
@@ -201,10 +202,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				}
 			}
 			if resp.NextContinuationToken == nil {
+				log.Debugf("All objects listed")
 				break
 			}
 			query.ContinuationToken = resp.NextContinuationToken
 		}
+
+		log.Debugf("CDSSize: %+v", cdsSize)
+		log.Debugf("CDSCount: %+v", cdsCount)
 
 		listDuration := time.Since(startList).Seconds()
 
