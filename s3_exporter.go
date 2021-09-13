@@ -154,6 +154,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	reCdsSuff := regexp.MustCompile(`_.+\.[cg]ds$`)
 	reSinMatch := regexp.MustCompile(`^\d{3,5}$`)
 	// Continue making requests until we've listed and compared the date of every object
+
 	startList := time.Now()
 	for _, cdsBucket := range e.conf.CdsBuckets {
 
@@ -208,20 +209,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 		listDuration := time.Since(startList).Seconds()
 
-		// Send all collected metrics in Prometheus registry
-		for key, value := range cdsSize {
-			log.Debugf("SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
-			ch <- prometheus.MustNewConstMetric(
-				s3CDSSize, prometheus.GaugeValue, float64(value), cdsBucket, key.ModifyDate, key.ObjectSin, key.FileType,
-			)
-		}
-
-		for key, value := range cdsCount {
-			ch <- prometheus.MustNewConstMetric(
-				s3CDSObjectTotal, prometheus.GaugeValue, float64(value), cdsBucket, key.ModifyDate, key.ObjectSin, key.FileType,
-			)
-		}
-
 		ch <- prometheus.MustNewConstMetric(
 			s3ListSuccess, prometheus.GaugeValue, 1, cdsBucket,
 		)
@@ -244,6 +231,21 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3SumSize, prometheus.GaugeValue, float64(totalSize), cdsBucket,
 		)
 
+	}
+
+	// Send all collected metrics in Prometheus registry
+	for key, value := range cdsSize {
+		log.Debugf("CDS Size send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
+		ch <- prometheus.MustNewConstMetric(
+			s3CDSSize, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
+		)
+	}
+
+	for key, value := range cdsCount {
+		log.Debugf("CDS Count send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
+		ch <- prometheus.MustNewConstMetric(
+			s3CDSObjectTotal, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
+		)
 	}
 
 	// Start processing trigger objects
