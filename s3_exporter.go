@@ -143,9 +143,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		lastObjectSize    int64
 	)
 
-	cdsSize := make(map[CdsObject]int64)
-	cdsCount := make(map[CdsObject]uint16)
-
 	// Set timezone for file modification
 	timezone, _ := time.LoadLocation(e.conf.Timezone)
 	// Start processing cds objects
@@ -157,6 +154,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	startList := time.Now()
 	for _, cdsBucket := range e.conf.CdsBuckets {
+		cdsSize := make(map[CdsObject]int64)
+		cdsCount := make(map[CdsObject]uint16)
 
 		for {
 			// Create query
@@ -231,21 +230,21 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3SumSize, prometheus.GaugeValue, float64(totalSize), cdsBucket,
 		)
 
-	}
+		// Send all collected metrics in Prometheus registry
+		for key, value := range cdsSize {
+			log.Debugf("CDS Size send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
+			ch <- prometheus.MustNewConstMetric(
+				s3CDSSize, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
+			)
+		}
 
-	// Send all collected metrics in Prometheus registry
-	for key, value := range cdsSize {
-		log.Debugf("CDS Size send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
-		ch <- prometheus.MustNewConstMetric(
-			s3CDSSize, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
-		)
-	}
+		for key, value := range cdsCount {
+			log.Debugf("CDS Count send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
+			ch <- prometheus.MustNewConstMetric(
+				s3CDSObjectTotal, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
+			)
+		}
 
-	for key, value := range cdsCount {
-		log.Debugf("CDS Count send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
-		ch <- prometheus.MustNewConstMetric(
-			s3CDSObjectTotal, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
-		)
 	}
 
 	// Start processing trigger objects
