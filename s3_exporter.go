@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
-	yaml "gopkg.in/yaml.v2"
+	yaml "gopkg.in/yaml.v3"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -93,13 +94,10 @@ type Config struct {
 	Timezone       string   `yaml:"timezone"`
 }
 
-func (conf *Config) set_defaults() {
-	if conf.EndpointUrl == "" {
-		conf.EndpointUrl = "127.0.0.1:8080"
-	}
-	if conf.Timezone == "" {
-		conf.Timezone = "Europe/Moscow"
-	}
+func (conf *Config) setDefaults() {
+	conf.EndpointUrl = "127.0.0.1:8080"
+	conf.Timezone = "UTC"
+	conf.DisableSSL = false
 }
 
 // Exporter is our exporter type
@@ -173,20 +171,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			}
 			for _, item := range resp.Contents {
 				objectName := strings.ToLower(*item.Key)
-				if !(strings.Contains(objectName, "/")) {
-					log.Debugf("Object '%v' not match. Skip.\n", objectName)
-					continue
-				}
 				sin := reCdsPref.ReplaceAllString(objectName, ``)
 				sin = reCdsSuff.ReplaceAllString(sin, ``)
-				matched := reSinMatch.MatchString(sin)
-				if !matched {
-					log.Debugf("SIN '%v' in object: '%v' not match. Skip.\n", sin, objectName)
+				if !reSinMatch.MatchString(sin) {
+					log.Debugf("SIN '%v' in object '%v' doesn't match regexp '%v'. Skip.\n", sin, objectName, reSinMatch)
 					continue
 				}
 				t := *item.LastModified
 				t = t.In(timezone)
-				log.Debugf("Shift time '%v' to '%v' for object '%v'\n", *item.LastModified, t, objectName)
+				log.Debugf("Shifting time '%v' to '%v' for object '%v'\n", *item.LastModified, t, objectName)
 				modDate := t.Format("2006.01.02")
 				fileType := objectName[len(objectName)-3:]
 				cdsSize[CdsObject{sin, modDate, fileType, cdsBucket}] += *item.Size
@@ -280,9 +273,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				objectNamePart := reTrigPref.ReplaceAllString(objectName, ``)
 				objectNameSlice := strings.Split(objectNamePart, `_`)
 				sin := objectNameSlice[0]
-				matched := reSinMatch.MatchString(sin)
-				if !matched {
-					log.Debugf("SIN '%v' in trigger object: '%v' not match. Skip.", sin, objectName)
+				if !reSinMatch.MatchString(sin) {
+					log.Debugf("SIN '%v' in trigger object '%v' doesn't match regexp '%v'. Skip.", sin, objectName, reSinMatch)
 					continue
 				}
 				program := strings.ToUpper(objectNameSlice[1])
@@ -293,7 +285,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 					continue
 				}
 				t = t.In(timezone)
-				log.Debugf("Shift time '%v' to '%v' for object '%v'", *item.LastModified, t, objectName)
+				log.Debugf("Shifting time '%v' to '%v' for object '%v'", *item.LastModified, t, objectName)
 				modDate := t.Format("2006.01.02")
 				triggerSize[TriggerObject{sin, program, modDate}] += *item.Size
 				triggerCount[TriggerObject{sin, program, modDate}] += 1
@@ -378,17 +370,17 @@ func init() {
 
 func readFile(confFile string, cfg *Config) {
 	f, err := os.Open(confFile)
+
 	if err != nil {
-		log.Errorln(err)
-		os.Exit(2)
+		log.Fatalln(err)
 	}
+
 	defer f.Close()
 
 	decoder := yaml.NewDecoder(f)
-	err = decoder.Decode(cfg)
-	if err != nil {
-		log.Errorln(err)
-		os.Exit(2)
+
+	if err := decoder.Decode(cfg); err != nil {
+		log.Fatalln(err)
 	}
 }
 
@@ -404,7 +396,6 @@ func main() {
 	app.Version(version.Print(namespace + "_exporter"))
 	app.HelpFlag.Short('h')
 	kingpin.MustParse(app.Parse(os.Args[1:]))
-
 	var sess *session.Session
 	var err error
 	var exporterConfig Config
@@ -412,19 +403,26 @@ func main() {
 	var forcePath bool = true
 	var awsRegion string = "us-west-1"
 
+	*expConfigPath, _ = filepath.Abs(*expConfigPath)
+	// Fil with defaults
+	exporterConfig.setDefaults()
+	log.Debugf("Exporter config with defaults:\n%#v", exporterConfig)
+	// Load from config
 	readFile(*expConfigPath, &exporterConfig)
-	// Fil to default when not configured in YAML
-	exporterConfig.set_defaults()
+	log.Debugf("Exporter config from file %#v:\n%#v", *expConfigPath, exporterConfig)
 	// Validate timezone
 	_, err = time.LoadLocation(exporterConfig.Timezone)
+
 	if err != nil {
 		log.Errorln("Invalid timezone:", exporterConfig.Timezone)
 		os.Exit(2)
 	} else {
 		log.Infoln("Load timezone", exporterConfig.Timezone)
 	}
+
 	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
 	sess, err = session.NewSession()
+
 	if err != nil {
 		log.Errorln("Error creating sessions ", err)
 	}

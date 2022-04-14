@@ -132,6 +132,6 @@ google.golang.org/protobuf/types/known/timestamppb
 # gopkg.in/alecthomas/kingpin.v2 v2.2.6
 ## explicit
 gopkg.in/alecthomas/kingpin.v2
-# gopkg.in/yaml.v2 v2.3.0
+# gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
 ## explicit
-gopkg.in/yaml.v2
+gopkg.in/yaml.v3
