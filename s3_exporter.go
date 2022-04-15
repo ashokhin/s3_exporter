@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -8,12 +9,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/log"
+	"github.com/prometheus/common/promlog"
+	"github.com/prometheus/common/promlog/flag"
 	"github.com/prometheus/common/version"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
-	yaml "gopkg.in/yaml.v3"
+	"gopkg.in/alecthomas/kingpin.v2"
+	"gopkg.in/yaml.v3"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -102,8 +106,9 @@ func (conf *Config) setDefaults() {
 
 // Exporter is our exporter type
 type Exporter struct {
-	conf Config
-	svc  s3iface.S3API
+	conf   Config
+	svc    s3iface.S3API
+	logger log.Logger
 }
 
 // Describe all the metrics we export
@@ -120,6 +125,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect metrics
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
+	level.Debug(e.logger).Log("msg", "start collect")
 	type CdsObject struct {
 		ObjectSin  string
 		ModifyDate string
@@ -140,6 +146,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		biggestObjectSize int64
 		lastObjectSize    int64
 	)
+
+	logger := e.logger
 
 	// Set timezone for file modification
 	timezone, _ := time.LoadLocation(e.conf.Timezone)
@@ -163,7 +171,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		for {
 			resp, err := e.svc.ListObjectsV2(query)
 			if err != nil {
-				log.Errorln(err)
+				level.Debug(logger).Log("msg", "failed when listing s3 objects", "error", err.Error())
 				ch <- prometheus.MustNewConstMetric(
 					s3ListSuccess, prometheus.GaugeValue, 0, cdsBucket,
 				)
@@ -174,12 +182,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				sin := reCdsPref.ReplaceAllString(objectName, ``)
 				sin = reCdsSuff.ReplaceAllString(sin, ``)
 				if !reSinMatch.MatchString(sin) {
-					log.Debugf("SIN '%v' in object '%v' doesn't match regexp '%v'. Skip.\n", sin, objectName, reSinMatch)
+					level.Debug(logger).Log("msg", "SIN of object doesn't match regexp and will be skipped", "object", objectName, "sin", sin, "regexp", reSinMatch)
 					continue
 				}
 				t := *item.LastModified
 				t = t.In(timezone)
-				log.Debugf("Shifting time '%v' to '%v' for object '%v'\n", *item.LastModified, t, objectName)
+				level.Debug(logger).Log("msg", "shifting time for object", "object", objectName, "shift_from", *item.LastModified, "shift_to", t)
 				modDate := t.Format("2006.01.02")
 				fileType := objectName[len(objectName)-3:]
 				cdsSize[CdsObject{sin, modDate, fileType, cdsBucket}] += *item.Size
@@ -195,14 +203,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				}
 			}
 			if resp.NextContinuationToken == nil {
-				log.Debugf("All objects listed")
+				level.Debug(logger).Log("msg", "all objects has been listed")
 				break
 			}
 			query.ContinuationToken = resp.NextContinuationToken
 		}
 
-		log.Debugf("CDSSize: %+v", cdsSize)
-		log.Debugf("CDSCount: %+v", cdsCount)
+		level.Debug(logger).Log("msg", "CDS size", "value", cdsSize)
+		level.Debug(logger).Log("msg", "CDS count", "value", cdsCount)
 
 		listDuration := time.Since(startList).Seconds()
 
@@ -230,14 +238,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 		// Send all collected metrics in Prometheus registry
 		for key, value := range cdsSize {
-			log.Debugf("CDS Size send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
+			level.Debug(logger).Log("msg", "CDS size metric send into Prometheus registry", "sin", key.ObjectSin, "date", key.ModifyDate, "type", key.FileType, "value", value)
 			ch <- prometheus.MustNewConstMetric(
 				s3CDSSize, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
 			)
 		}
 
 		for key, value := range cdsCount {
-			log.Debugf("CDS Count send: SIN: %v, Date: %v, Type: %v, Value: %v\n", key.ObjectSin, key.ModifyDate, key.FileType, value)
+			level.Debug(logger).Log("msg", "CDS count metric send into Prometheus registry", "sin", key.ObjectSin, "date", key.ModifyDate, "type", key.FileType, "value", value)
 			ch <- prometheus.MustNewConstMetric(
 				s3CDSObjectTotal, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
 			)
@@ -258,7 +266,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		for {
 			resp, err := e.svc.ListObjectsV2(query)
 			if err != nil {
-				log.Errorln(err)
+				level.Error(logger).Log("msg", "failed list s3 objects", "error", err.Error())
 				ch <- prometheus.MustNewConstMetric(
 					s3ListSuccess, prometheus.GaugeValue, 0, triggerBucket,
 				)
@@ -266,26 +274,22 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			}
 			for _, item := range resp.Contents {
 				objectName := strings.ToLower(*item.Key)
-				if !(strings.Contains(objectName, "/")) {
-					log.Debugf("Object '%v' not match. Skip.", objectName)
-					continue
-				}
 				objectNamePart := reTrigPref.ReplaceAllString(objectName, ``)
 				objectNameSlice := strings.Split(objectNamePart, `_`)
 				sin := objectNameSlice[0]
 				if !reSinMatch.MatchString(sin) {
-					log.Debugf("SIN '%v' in trigger object '%v' doesn't match regexp '%v'. Skip.", sin, objectName, reSinMatch)
+					level.Debug(logger).Log("msg", "SIN in trigger object name doesn't match regexp and will be skipped", "object", objectName, "sin", sin, "regexp", reSinMatch)
 					continue
 				}
 				program := strings.ToUpper(objectNameSlice[1])
 				// Parse string (part of name) to timestamp
 				t, err := time.Parse("200601021504", objectNameSlice[2][0:12])
 				if err != nil {
-					log.Debugf("Time string '%v' cannot be parsed to timestamp with error: '%v'", objectNameSlice[2][0:12], err)
+					level.Debug(logger).Log("msg", "failed to parse time string", "object", objectName, "timestring", objectNameSlice[2][0:12], "error", err.Error())
 					continue
 				}
 				t = t.In(timezone)
-				log.Debugf("Shifting time '%v' to '%v' for object '%v'", *item.LastModified, t, objectName)
+				level.Debug(logger).Log("msg", "shifting time for object", "object", objectName, "shift_from", *item.LastModified, "shift_to", t)
 				modDate := t.Format("2006.01.02")
 				triggerSize[TriggerObject{sin, program, modDate}] += *item.Size
 				triggerCount[TriggerObject{sin, program, modDate}] += 1
@@ -309,7 +313,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 		// Send all collected metrics in Prometheus registry
 		for key, value := range triggerSize {
-			log.Debugf("SIN: '%v', Program: '%v', Date: '%v', Value: '%v'\n", key.ObjectSin, key.ObjectProgram, key.ModifyDate, value)
+			level.Debug(logger).Log("msg", "expose new metric about triggers size", "sin", key.ObjectSin, "program", key.ObjectProgram, "date", key.ModifyDate, "value", value)
 			ch <- prometheus.MustNewConstMetric(
 				s3TriggerSize, prometheus.GaugeValue, float64(value), triggerBucket, key.ModifyDate, key.ObjectSin, key.ObjectProgram,
 			)
@@ -345,15 +349,16 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func metricsHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API, conf Config) {
+func metricsHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API, conf Config, logger log.Logger) {
 	if len(conf.CdsBuckets) == 0 {
 		http.Error(w, "bucket parameter is missing", http.StatusBadRequest)
 		return
 	}
 
 	exporter := &Exporter{
-		conf: conf,
-		svc:  svc,
+		conf:   conf,
+		svc:    svc,
+		logger: logger,
 	}
 
 	registry := prometheus.NewRegistry()
@@ -368,11 +373,11 @@ func init() {
 	prometheus.MustRegister(version.NewCollector(namespace + "_exporter"))
 }
 
-func readFile(confFile string, cfg *Config) {
+func readFile(confFile string, cfg *Config, logger log.Logger) {
 	f, err := os.Open(confFile)
 
 	if err != nil {
-		log.Fatalln(err)
+		level.Error(logger).Log("msg", "failed to open file", "file", confFile, "error", err.Error())
 	}
 
 	defer f.Close()
@@ -380,22 +385,25 @@ func readFile(confFile string, cfg *Config) {
 	decoder := yaml.NewDecoder(f)
 
 	if err := decoder.Decode(cfg); err != nil {
-		log.Fatalln(err)
+		level.Error(logger).Log("msg", "failed to docode YAML config", "error", err.Error())
+		os.Exit(1)
 	}
 }
 
 func main() {
 	var (
-		app           = kingpin.New(namespace+"_exporter", "Export metrics for CDS S3-compatible storage").DefaultEnvars()
-		listenAddress = app.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
-		metricsPath   = app.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
-		expConfigPath = app.Flag("exporter-config-file", "Path to exporter config file").Default("./config.yml").String()
+		listenAddress = kingpin.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
+		metricsPath   = kingpin.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
+		expConfigPath = kingpin.Flag("exporter-config-file", "Path to exporter config file").Default("./config.yml").String()
 	)
 
-	log.AddFlags(app)
-	app.Version(version.Print(namespace + "_exporter"))
-	app.HelpFlag.Short('h')
-	kingpin.MustParse(app.Parse(os.Args[1:]))
+	promlogConfig := &promlog.Config{}
+	flag.AddFlags(kingpin.CommandLine, promlogConfig)
+	kingpin.Version(version.Print(namespace + "_exporter"))
+	kingpin.CommandLine.UsageWriter(os.Stdout)
+	kingpin.HelpFlag.Short('h')
+	kingpin.Parse()
+	logger := promlog.New(promlogConfig)
 	var sess *session.Session
 	var err error
 	var exporterConfig Config
@@ -406,25 +414,26 @@ func main() {
 	*expConfigPath, _ = filepath.Abs(*expConfigPath)
 	// Fil with defaults
 	exporterConfig.setDefaults()
-	log.Debugf("Exporter config with defaults:\n%#v", exporterConfig)
+	level.Debug(logger).Log("msg", "exporter config with defaults", "value", fmt.Sprintf("%+v", exporterConfig))
 	// Load from config
-	readFile(*expConfigPath, &exporterConfig)
-	log.Debugf("Exporter config from file %#v:\n%#v", *expConfigPath, exporterConfig)
+	readFile(*expConfigPath, &exporterConfig, logger)
+	level.Debug(logger).Log("msg", "exporter's config from file", "file", *expConfigPath, "value", fmt.Sprintf("%+v", exporterConfig))
 	// Validate timezone
 	_, err = time.LoadLocation(exporterConfig.Timezone)
 
 	if err != nil {
-		log.Errorln("Invalid timezone:", exporterConfig.Timezone)
-		os.Exit(2)
+		level.Error(logger).Log("msg", "failed to load timezone", "timezone", exporterConfig.Timezone, "error", err.Error())
+		os.Exit(1)
 	} else {
-		log.Infoln("Load timezone", exporterConfig.Timezone)
+		level.Info(logger).Log("msg", "load timezone", "timezone", exporterConfig.Timezone)
 	}
 
 	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
 	sess, err = session.NewSession()
 
 	if err != nil {
-		log.Errorln("Error creating sessions ", err)
+		level.Error(logger).Log("msg", "error creating session", "error", err.Error())
+		os.Exit(1)
 	}
 
 	cfg := aws.NewConfig()
@@ -437,11 +446,11 @@ func main() {
 
 	svc := s3.New(sess, cfg)
 
-	log.Infoln("Starting "+namespace+"_exporter", version.Info())
-	log.Infoln("Build context", version.BuildContext())
+	level.Info(logger).Log("msg", "starting exporter", "version", version.Info())
+	level.Info(logger).Log("msg", "Build context", version.BuildContext())
 
 	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
-		metricsHandler(w, r, svc, exporterConfig)
+		metricsHandler(w, r, svc, exporterConfig, logger)
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
@@ -453,6 +462,9 @@ func main() {
 						 </html>`))
 	})
 
-	log.Infoln("Listening on", *listenAddress)
-	log.Fatal(http.ListenAndServe(*listenAddress, nil))
+	level.Info(logger).Log("msg", "listening on address", "address", *listenAddress)
+	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
+		level.Error(logger).Log("msg", "error running HTTP server", "err", err.Error())
+		os.Exit(1)
+	}
 }
