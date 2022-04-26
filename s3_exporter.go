@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,15 +20,17 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/yaml.v3"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 const (
-	namespace = "s3"
+	namespace        = "s3"
+	awsRegion string = "us-west-1"
+	// In Ceph need to set "HostnameImmutable" option to true for resolving path to bucket right
+	forcePath bool = true
 )
 
 var (
@@ -88,7 +91,7 @@ var (
 	)
 )
 
-type Config struct {
+type ExporterConfig struct {
 	EndpointUrl    string   `yaml:"endpoint_url"`
 	AwsAccessKey   string   `yaml:"access_key"`
 	AwsSecretKey   string   `yaml:"secret_key"`
@@ -96,19 +99,74 @@ type Config struct {
 	CdsBuckets     []string `yaml:"cds_buckets"`
 	TriggerBuckets []string `yaml:"trigger_buckets"`
 	Timezone       string   `yaml:"timezone"`
+	logger         log.Logger
+	s3Client       *s3.Client
+	ctx            context.Context
 }
 
-func (conf *Config) setDefaults() {
+func (conf *ExporterConfig) setDefaults(logger log.Logger) {
 	conf.EndpointUrl = "127.0.0.1:8080"
 	conf.Timezone = "UTC"
 	conf.DisableSSL = false
+	conf.logger = logger
+	conf.ctx = context.Background()
+}
+
+func (conf *ExporterConfig) loadConfig(confFile string) {
+	logger := conf.logger
+	f, err := os.Open(confFile)
+
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to open file", "file", confFile, "error", err.Error())
+	}
+
+	defer f.Close()
+
+	decoder := yaml.NewDecoder(f)
+
+	if err := decoder.Decode(conf); err != nil {
+		level.Error(logger).Log("msg", "failed to docode YAML config", "error", err.Error())
+		os.Exit(1)
+	}
+}
+
+func (conf *ExporterConfig) createS3Client() {
+	var s3Url string
+	logger := conf.logger
+
+	level.Debug(logger).Log("msg", "create client for specified context")
+
+	if conf.DisableSSL {
+		s3Url = fmt.Sprintf("http://%s/", conf.EndpointUrl)
+	} else {
+		s3Url = fmt.Sprintf("https://%s/", conf.EndpointUrl)
+	}
+
+	customResolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{
+			PartitionID:       "aws",
+			URL:               s3Url,
+			SigningRegion:     awsRegion,
+			HostnameImmutable: forcePath,
+		}, nil
+	})
+
+	cfg, err := config.LoadDefaultConfig(conf.ctx, config.WithEndpointResolverWithOptions(customResolver),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(conf.AwsAccessKey,
+			conf.AwsSecretKey, "")))
+
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to load configuration", "err", err.Error())
+
+		os.Exit(1)
+	}
+
+	conf.s3Client = s3.NewFromConfig(cfg)
 }
 
 // Exporter is our exporter type
 type Exporter struct {
-	conf   Config
-	svc    s3iface.S3API
-	logger log.Logger
+	conf ExporterConfig
 }
 
 // Describe all the metrics we export
@@ -125,7 +183,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect metrics
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	level.Debug(e.logger).Log("msg", "start collect")
+	level.Debug(e.conf.logger).Log("msg", "start collect")
 	type CdsObject struct {
 		ObjectSin  string
 		ModifyDate string
@@ -147,7 +205,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		lastObjectSize    int64
 	)
 
-	logger := e.logger
+	logger := e.conf.logger
+	ctx := e.conf.ctx
 
 	// Set timezone for file modification
 	timezone, _ := time.LoadLocation(e.conf.Timezone)
@@ -169,7 +228,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		for {
-			resp, err := e.svc.ListObjectsV2(query)
+			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
 			if err != nil {
 				level.Debug(logger).Log("msg", "failed when listing s3 objects", "error", err.Error())
 				ch <- prometheus.MustNewConstMetric(
@@ -190,16 +249,16 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				level.Debug(logger).Log("msg", "shifting time for object", "object", objectName, "shift_from", *item.LastModified, "shift_to", t)
 				modDate := t.Format("2006.01.02")
 				fileType := objectName[len(objectName)-3:]
-				cdsSize[CdsObject{sin, modDate, fileType, cdsBucket}] += *item.Size
+				cdsSize[CdsObject{sin, modDate, fileType, cdsBucket}] += item.Size
 				cdsCount[CdsObject{sin, modDate, fileType, cdsBucket}] += 1
 				numberOfObjects++
-				totalSize = totalSize + *item.Size
+				totalSize = totalSize + item.Size
 				if item.LastModified.After(lastModified) {
 					lastModified = *item.LastModified
-					lastObjectSize = *item.Size
+					lastObjectSize = item.Size
 				}
-				if *item.Size > biggestObjectSize {
-					biggestObjectSize = *item.Size
+				if item.Size > biggestObjectSize {
+					biggestObjectSize = item.Size
 				}
 			}
 			if resp.NextContinuationToken == nil {
@@ -264,7 +323,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 		startList = time.Now()
 		for {
-			resp, err := e.svc.ListObjectsV2(query)
+			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
 			if err != nil {
 				level.Error(logger).Log("msg", "failed list s3 objects", "error", err.Error())
 				ch <- prometheus.MustNewConstMetric(
@@ -291,16 +350,16 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				t = t.In(timezone)
 				level.Debug(logger).Log("msg", "shifting time for object", "object", objectName, "shift_from", *item.LastModified, "shift_to", t)
 				modDate := t.Format("2006.01.02")
-				triggerSize[TriggerObject{sin, program, modDate}] += *item.Size
+				triggerSize[TriggerObject{sin, program, modDate}] += item.Size
 				triggerCount[TriggerObject{sin, program, modDate}] += 1
 				numberOfObjects++
-				totalSize = totalSize + *item.Size
+				totalSize = totalSize + item.Size
 				if item.LastModified.After(lastModified) {
 					lastModified = *item.LastModified
-					lastObjectSize = *item.Size
+					lastObjectSize = item.Size
 				}
-				if *item.Size > biggestObjectSize {
-					biggestObjectSize = *item.Size
+				if item.Size > biggestObjectSize {
+					biggestObjectSize = item.Size
 				}
 			}
 			if resp.NextContinuationToken == nil {
@@ -349,16 +408,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func metricsHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API, conf Config, logger log.Logger) {
+func metricsHandler(w http.ResponseWriter, r *http.Request, conf ExporterConfig, logger log.Logger) {
 	if len(conf.CdsBuckets) == 0 {
 		http.Error(w, "bucket parameter is missing", http.StatusBadRequest)
 		return
 	}
 
 	exporter := &Exporter{
-		conf:   conf,
-		svc:    svc,
-		logger: logger,
+		conf: conf,
 	}
 
 	registry := prometheus.NewRegistry()
@@ -371,23 +428,6 @@ func metricsHandler(w http.ResponseWriter, r *http.Request, svc s3iface.S3API, c
 
 func init() {
 	prometheus.MustRegister(version.NewCollector(namespace + "_exporter"))
-}
-
-func readFile(confFile string, cfg *Config, logger log.Logger) {
-	f, err := os.Open(confFile)
-
-	if err != nil {
-		level.Error(logger).Log("msg", "failed to open file", "file", confFile, "error", err.Error())
-	}
-
-	defer f.Close()
-
-	decoder := yaml.NewDecoder(f)
-
-	if err := decoder.Decode(cfg); err != nil {
-		level.Error(logger).Log("msg", "failed to docode YAML config", "error", err.Error())
-		os.Exit(1)
-	}
 }
 
 func main() {
@@ -404,19 +444,18 @@ func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 	logger := promlog.New(promlogConfig)
-	var sess *session.Session
-	var err error
-	var exporterConfig Config
 
-	var forcePath bool = true
-	var awsRegion string = "us-west-1"
+	var err error
+	var exporterConfig ExporterConfig
 
 	*expConfigPath, _ = filepath.Abs(*expConfigPath)
 	// Fil with defaults
-	exporterConfig.setDefaults()
+	exporterConfig.setDefaults(logger)
 	level.Debug(logger).Log("msg", "exporter config with defaults", "value", fmt.Sprintf("%+v", exporterConfig))
 	// Load from config
-	readFile(*expConfigPath, &exporterConfig, logger)
+	exporterConfig.loadConfig(*expConfigPath)
+	exporterConfig.createS3Client()
+
 	level.Debug(logger).Log("msg", "exporter's config from file", "file", *expConfigPath, "value", fmt.Sprintf("%+v", exporterConfig))
 	// Validate timezone
 	_, err = time.LoadLocation(exporterConfig.Timezone)
@@ -428,29 +467,11 @@ func main() {
 		level.Info(logger).Log("msg", "load timezone", "timezone", exporterConfig.Timezone)
 	}
 
-	awsCreds := credentials.NewStaticCredentials(exporterConfig.AwsAccessKey, exporterConfig.AwsSecretKey, "")
-	sess, err = session.NewSession()
-
-	if err != nil {
-		level.Error(logger).Log("msg", "error creating session", "error", err.Error())
-		os.Exit(1)
-	}
-
-	cfg := aws.NewConfig()
-
-	cfg.WithCredentials(awsCreds)
-	cfg.WithRegion(awsRegion)
-	cfg.WithEndpoint(exporterConfig.EndpointUrl)
-	cfg.WithDisableSSL(exporterConfig.DisableSSL)
-	cfg.WithS3ForcePathStyle(forcePath)
-
-	svc := s3.New(sess, cfg)
-
 	level.Info(logger).Log("msg", "starting exporter", "version", version.Info())
 	level.Info(logger).Log("msg", "Build context", version.BuildContext())
 
 	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
-		metricsHandler(w, r, svc, exporterConfig, logger)
+		metricsHandler(w, r, exporterConfig, logger)
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
