@@ -13,6 +13,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
@@ -420,6 +421,10 @@ func metricsHandler(w http.ResponseWriter, r *http.Request, conf ExporterConfig,
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(exporter)
+	registry.MustRegister(
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		collectors.NewGoCollector(),
+	)
 
 	// Serve
 	h := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
