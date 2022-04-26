@@ -268,8 +268,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			query.ContinuationToken = resp.NextContinuationToken
 		}
 
-		level.Debug(logger).Log("msg", "CDS size", "value", cdsSize)
-		level.Debug(logger).Log("msg", "CDS count", "value", cdsCount)
+		level.Debug(logger).Log("msg", "CDS size", "value", fmt.Sprintf("%+v", cdsSize))
+		level.Debug(logger).Log("msg", "CDS count", "value", fmt.Sprintf("%+v", cdsCount))
 
 		listDuration := time.Since(startList).Seconds()
 
