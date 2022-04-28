@@ -242,7 +242,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		for {
 			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
 			if err != nil {
-				level.Debug(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", cdsBucket, "error", err.Error())
+				level.Warn(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", cdsBucket, "error", err.Error())
 				list_failed = true
 				break
 			}
@@ -344,7 +344,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		for {
 			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
 			if err != nil {
-				level.Error(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", triggerBucket, "error", err.Error())
+				level.Warn(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", triggerBucket, "error", err.Error())
 				list_failed = true
 				break
 			}
