@@ -37,7 +37,7 @@ const (
 var (
 	s3ListSuccess = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "list_success"),
-		"If the ListObjects operation was a success",
+		"1 - If the ListObjects operation was a success",
 		[]string{"bucket"}, nil,
 	)
 	s3ListDuration = prometheus.NewDesc(
@@ -113,12 +113,14 @@ func (conf *ExporterConfig) setDefaults(logger log.Logger) {
 	conf.ctx = context.Background()
 }
 
-func (conf *ExporterConfig) loadConfig(confFile string) {
+func (conf *ExporterConfig) loadConfig(confFile string) error {
 	logger := conf.logger
 	f, err := os.Open(confFile)
 
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to open file", "file", confFile, "error", err.Error())
+
+		return err
 	}
 
 	defer f.Close()
@@ -127,15 +129,17 @@ func (conf *ExporterConfig) loadConfig(confFile string) {
 
 	if err := decoder.Decode(conf); err != nil {
 		level.Error(logger).Log("msg", "failed to docode YAML config", "error", err.Error())
-		os.Exit(1)
+
+		return err
 	}
+	return nil
 }
 
-func (conf *ExporterConfig) createS3Client() {
+func (conf *ExporterConfig) createS3Client() error {
 	var s3Url string
 	logger := conf.logger
 
-	level.Debug(logger).Log("msg", "create client for specified context")
+	level.Debug(logger).Log("msg", "creating s3 client")
 
 	if conf.DisableSSL {
 		s3Url = fmt.Sprintf("http://%s/", conf.EndpointUrl)
@@ -156,13 +160,17 @@ func (conf *ExporterConfig) createS3Client() {
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(conf.AwsAccessKey,
 			conf.AwsSecretKey, "")))
 
+	level.Debug(logger).Log("msg", "client configuration", "value", fmt.Sprintf("%+v", cfg))
+
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to load configuration", "err", err.Error())
 
-		os.Exit(1)
+		return err
 	}
 
 	conf.s3Client = s3.NewFromConfig(cfg)
+
+	return nil
 }
 
 // Exporter is our exporter type
@@ -184,7 +192,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect metrics
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	level.Debug(e.conf.logger).Log("msg", "start collect")
+	level.Debug(e.conf.logger).Log("msg", "starting collection")
 	type CdsObject struct {
 		ObjectSin  string
 		ModifyDate string
@@ -216,26 +224,27 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	reCdsPref := regexp.MustCompile(`^[a-z0-9/]+_`)
 	reCdsSuff := regexp.MustCompile(`_.+\.[cg]ds$`)
 	reSinMatch := regexp.MustCompile(`^\d{3,5}$`)
-	// Continue making requests until we've listed and compared the date of every object
+	startCollect := time.Now()
 
-	startList := time.Now()
 	for _, cdsBucket := range e.conf.CdsBuckets {
 		cdsSize := make(map[CdsObject]int64)
 		cdsCount := make(map[CdsObject]uint16)
+		startList := time.Now()
 
 		// Create query
 		query := &s3.ListObjectsV2Input{
 			Bucket: aws.String(cdsBucket),
 		}
 
+		list_failed := false
+
+		// Continue making requests until we've listed and compared the date of every object
 		for {
 			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
 			if err != nil {
-				level.Debug(logger).Log("msg", "failed when listing s3 objects", "error", err.Error())
-				ch <- prometheus.MustNewConstMetric(
-					s3ListSuccess, prometheus.GaugeValue, 0, cdsBucket,
-				)
-				return
+				level.Debug(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", cdsBucket, "error", err.Error())
+				list_failed = true
+				break
 			}
 			for _, item := range resp.Contents {
 				objectName := strings.ToLower(*item.Key)
@@ -269,14 +278,19 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			query.ContinuationToken = resp.NextContinuationToken
 		}
 
-		level.Debug(logger).Log("msg", "CDS size", "value", fmt.Sprintf("%+v", cdsSize))
-		level.Debug(logger).Log("msg", "CDS count", "value", fmt.Sprintf("%+v", cdsCount))
+		if list_failed {
+			ch <- prometheus.MustNewConstMetric(
+				s3ListSuccess, prometheus.GaugeValue, 0, cdsBucket,
+			)
+			continue
+		} else {
+			ch <- prometheus.MustNewConstMetric(
+				s3ListSuccess, prometheus.GaugeValue, 1, cdsBucket,
+			)
+		}
 
 		listDuration := time.Since(startList).Seconds()
 
-		ch <- prometheus.MustNewConstMetric(
-			s3ListSuccess, prometheus.GaugeValue, 1, cdsBucket,
-		)
 		ch <- prometheus.MustNewConstMetric(
 			s3ListDuration, prometheus.GaugeValue, listDuration, cdsBucket,
 		)
@@ -298,14 +312,12 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 		// Send all collected metrics in Prometheus registry
 		for key, value := range cdsSize {
-			level.Debug(logger).Log("msg", "CDS size metric send into Prometheus registry", "sin", key.ObjectSin, "date", key.ModifyDate, "type", key.FileType, "value", value)
 			ch <- prometheus.MustNewConstMetric(
 				s3CDSSize, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
 			)
 		}
 
 		for key, value := range cdsCount {
-			level.Debug(logger).Log("msg", "CDS count metric send into Prometheus registry", "sin", key.ObjectSin, "date", key.ModifyDate, "type", key.FileType, "value", value)
 			ch <- prometheus.MustNewConstMetric(
 				s3CDSObjectTotal, prometheus.GaugeValue, float64(value), key.BucketName, key.ModifyDate, key.ObjectSin, key.FileType,
 			)
@@ -315,22 +327,26 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	// Start processing trigger objects
 	reTrigPref := regexp.MustCompile(`^[a-z0-9/]+_`)
+
 	for _, triggerBucket := range e.conf.TriggerBuckets {
 		triggerSize := make(map[TriggerObject]int64)
 		triggerCount := make(map[TriggerObject]uint16)
+		startList := time.Now()
+
 		// Create query
 		query := &s3.ListObjectsV2Input{
-			Bucket: &triggerBucket,
+			Bucket: aws.String(triggerBucket),
 		}
-		startList = time.Now()
+
+		list_failed := false
+
+		// Continue making requests until we've listed and compared the date of every object
 		for {
 			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
 			if err != nil {
-				level.Error(logger).Log("msg", "failed list s3 objects", "error", err.Error())
-				ch <- prometheus.MustNewConstMetric(
-					s3ListSuccess, prometheus.GaugeValue, 0, triggerBucket,
-				)
-				return
+				level.Error(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", triggerBucket, "error", err.Error())
+				list_failed = true
+				break
 			}
 			for _, item := range resp.Contents {
 				objectName := strings.ToLower(*item.Key)
@@ -369,11 +385,21 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			query.ContinuationToken = resp.NextContinuationToken
 		}
 
+		if list_failed {
+			ch <- prometheus.MustNewConstMetric(
+				s3ListSuccess, prometheus.GaugeValue, 0, triggerBucket,
+			)
+			continue
+		} else {
+			ch <- prometheus.MustNewConstMetric(
+				s3ListSuccess, prometheus.GaugeValue, 1, triggerBucket,
+			)
+		}
+
 		listDuration := time.Since(startList).Seconds()
 
 		// Send all collected metrics in Prometheus registry
 		for key, value := range triggerSize {
-			level.Debug(logger).Log("msg", "expose new metric about triggers size", "sin", key.ObjectSin, "program", key.ObjectProgram, "date", key.ModifyDate, "value", value)
 			ch <- prometheus.MustNewConstMetric(
 				s3TriggerSize, prometheus.GaugeValue, float64(value), triggerBucket, key.ModifyDate, key.ObjectSin, key.ObjectProgram,
 			)
@@ -385,9 +411,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			)
 		}
 
-		ch <- prometheus.MustNewConstMetric(
-			s3ListSuccess, prometheus.GaugeValue, 1, triggerBucket,
-		)
 		ch <- prometheus.MustNewConstMetric(
 			s3ListDuration, prometheus.GaugeValue, listDuration, triggerBucket,
 		)
@@ -407,13 +430,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3SumSize, prometheus.GaugeValue, float64(totalSize), triggerBucket,
 		)
 	}
+
+	level.Debug(logger).Log("msg", "ending collection", "eta", time.Since(startCollect))
 }
 
 func metricsHandler(w http.ResponseWriter, r *http.Request, conf ExporterConfig, logger log.Logger) {
-	if len(conf.CdsBuckets) == 0 {
-		http.Error(w, "bucket parameter is missing", http.StatusBadRequest)
+	/*if (len(conf.CdsBuckets) == 0) && (len(conf.TriggerBuckets) == 0) {
+		http.Error(w, "bucket parameter is missing in exporter config", http.StatusBadRequest)
 		return
-	}
+	}*/
 
 	exporter := &Exporter{
 		conf: conf,
@@ -426,7 +451,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request, conf ExporterConfig,
 		collectors.NewGoCollector(),
 	)
 
-	// Serve
+	// Serve HTTP
 	h := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 	h.ServeHTTP(w, r)
 }
@@ -439,7 +464,7 @@ func main() {
 	var (
 		listenAddress = kingpin.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9340").String()
 		metricsPath   = kingpin.Flag("web.metrics-path", "Path under which to expose metrics").Default("/metrics").String()
-		expConfigPath = kingpin.Flag("exporter-config-file", "Path to exporter config file").Default("./config.yml").String()
+		expConfigPath = kingpin.Flag("exporter-config-file", "Path to exporter config file").Default("").String()
 	)
 
 	promlogConfig := &promlog.Config{}
@@ -453,15 +478,23 @@ func main() {
 	var err error
 	var exporterConfig ExporterConfig
 
-	*expConfigPath, _ = filepath.Abs(*expConfigPath)
 	// Fil with defaults
 	exporterConfig.setDefaults(logger)
-	level.Debug(logger).Log("msg", "exporter config with defaults", "value", fmt.Sprintf("%+v", exporterConfig))
-	// Load from config
-	exporterConfig.loadConfig(*expConfigPath)
-	exporterConfig.createS3Client()
+	if len(*expConfigPath) > 0 {
+		*expConfigPath, _ = filepath.Abs(*expConfigPath)
+		level.Info(logger).Log("msg", "use exporter config from file", "file", *expConfigPath)
+		// Load from config
+		if err = exporterConfig.loadConfig(*expConfigPath); err != nil {
+			os.Exit(1)
+		}
+	}
+	// create s3 client with context
+	if err = exporterConfig.createS3Client(); err != nil {
+		os.Exit(1)
+	}
 
-	level.Debug(logger).Log("msg", "exporter's config from file", "file", *expConfigPath, "value", fmt.Sprintf("%+v", exporterConfig))
+	level.Debug(logger).Log("msg", "exporter's config", "value", fmt.Sprintf("%+v", exporterConfig))
+
 	// Validate timezone
 	_, err = time.LoadLocation(exporterConfig.Timezone)
 
@@ -469,7 +502,7 @@ func main() {
 		level.Error(logger).Log("msg", "failed to load timezone", "timezone", exporterConfig.Timezone, "error", err.Error())
 		os.Exit(1)
 	} else {
-		level.Info(logger).Log("msg", "load timezone", "timezone", exporterConfig.Timezone)
+		level.Info(logger).Log("msg", "loaded timezone", "timezone", exporterConfig.Timezone)
 	}
 
 	level.Info(logger).Log("msg", "starting exporter", "version", version.Info())
