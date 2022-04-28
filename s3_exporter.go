@@ -208,7 +208,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	var (
 		lastModified      time.Time
-		numberOfObjects   float64
+		numberOfObjects   int16
 		totalSize         int64
 		biggestObjectSize int64
 		lastObjectSize    int64
@@ -301,7 +301,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), cdsBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
-			s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, cdsBucket,
+			s3ObjectTotal, prometheus.CounterValue, float64(numberOfObjects), cdsBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), cdsBucket,
@@ -421,7 +421,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), triggerBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
-			s3ObjectTotal, prometheus.GaugeValue, numberOfObjects, triggerBucket,
+			s3ObjectTotal, prometheus.CounterValue, float64(numberOfObjects), triggerBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), triggerBucket,
@@ -480,6 +480,7 @@ func main() {
 
 	// Fil with defaults
 	exporterConfig.setDefaults(logger)
+
 	if len(*expConfigPath) > 0 {
 		*expConfigPath, _ = filepath.Abs(*expConfigPath)
 		level.Info(logger).Log("msg", "use exporter config from file", "file", *expConfigPath)
@@ -488,6 +489,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
 	// create s3 client with context
 	if err = exporterConfig.createS3Client(); err != nil {
 		os.Exit(1)
@@ -496,9 +498,7 @@ func main() {
 	level.Debug(logger).Log("msg", "exporter's config", "value", fmt.Sprintf("%+v", exporterConfig))
 
 	// Validate timezone
-	_, err = time.LoadLocation(exporterConfig.Timezone)
-
-	if err != nil {
+	if _, err = time.LoadLocation(exporterConfig.Timezone); err != nil {
 		level.Error(logger).Log("msg", "failed to load timezone", "timezone", exporterConfig.Timezone, "error", err.Error())
 		os.Exit(1)
 	} else {
@@ -506,7 +506,7 @@ func main() {
 	}
 
 	level.Info(logger).Log("msg", "starting exporter", "version", version.Info())
-	level.Info(logger).Log("msg", "Build context", version.BuildContext())
+	level.Info(logger).Log("msg", "build context", version.BuildContext())
 
 	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r, exporterConfig, logger)
@@ -522,7 +522,8 @@ func main() {
 	})
 
 	level.Info(logger).Log("msg", "listening on address", "address", *listenAddress)
-	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
+
+	if err = http.ListenAndServe(*listenAddress, nil); err != nil {
 		level.Error(logger).Log("msg", "error running HTTP server", "err", err.Error())
 		os.Exit(1)
 	}
