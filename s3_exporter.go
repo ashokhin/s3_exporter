@@ -208,7 +208,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	var (
 		lastModified      time.Time
-		numberOfObjects   int16
+		numberOfObjects   uint32
 		totalSize         int64
 		biggestObjectSize int64
 		lastObjectSize    int64
@@ -228,7 +228,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	for _, cdsBucket := range e.conf.CdsBuckets {
 		cdsSize := make(map[CdsObject]int64)
-		cdsCount := make(map[CdsObject]uint16)
+		cdsCount := make(map[CdsObject]uint32)
 		startList := time.Now()
 
 		// Create query
@@ -301,7 +301,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), cdsBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
-			s3ObjectTotal, prometheus.CounterValue, float64(numberOfObjects), cdsBucket,
+			s3ObjectTotal, prometheus.GaugeValue, float64(numberOfObjects), cdsBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), cdsBucket,
@@ -330,7 +330,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	for _, triggerBucket := range e.conf.TriggerBuckets {
 		triggerSize := make(map[TriggerObject]int64)
-		triggerCount := make(map[TriggerObject]uint16)
+		triggerCount := make(map[TriggerObject]uint32)
 		startList := time.Now()
 
 		// Create query
@@ -421,7 +421,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), triggerBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
-			s3ObjectTotal, prometheus.CounterValue, float64(numberOfObjects), triggerBucket,
+			s3ObjectTotal, prometheus.GaugeValue, float64(numberOfObjects), triggerBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), triggerBucket,
