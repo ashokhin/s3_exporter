@@ -1,8 +1,0 @@
-repository:
-    path: github.com/ashokhin/s3_exporter
-build:
-    flags: -a -tags netgo
-
-tarball:
-    files:
-        - LICENSE

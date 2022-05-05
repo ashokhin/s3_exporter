@@ -435,11 +435,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 }
 
 func metricsHandler(w http.ResponseWriter, r *http.Request, conf ExporterConfig, logger log.Logger) {
-	/*if (len(conf.CdsBuckets) == 0) && (len(conf.TriggerBuckets) == 0) {
-		http.Error(w, "bucket parameter is missing in exporter config", http.StatusBadRequest)
-		return
-	}*/
-
 	exporter := &Exporter{
 		conf: conf,
 	}
