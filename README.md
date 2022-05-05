@@ -57,27 +57,6 @@ Flags can also be set as environment variables, prefixed by `s3_exporter_`. For 
 
 ## Prometheus
 
-### Configuration
-
-You can pass the params to a single instance of the exporter using relabelling, like so:
-
-```yml
-scrape_configs:
-  - job_name: "s3"
-    metrics_path: /inspect
-    static_configs:
-      - targets:
-          - bucket=stuff;
-          - bucket=other-stuff;
-    relabel_configs:
-      - source_labels: [__address__]
-        regex: "^bucket=(.*);$"
-        replacement: "${1}"
-        target_label: "__param_bucket"
-      - target_label: __address__
-        replacement: 127.0.0.1:9340 # S3 exporter.
-```
-
 ### Example Queries
 
 Возвраащает серию, где последняя дата модификации объекта больше 24 часов:
