@@ -506,7 +506,7 @@ func main() {
 	}
 
 	level.Info(logger).Log("msg", "starting exporter", "version", version.Info())
-	level.Info(logger).Log("msg", "build context", version.BuildContext())
+	level.Info(logger).Log("msg", "build context", "build_context", version.BuildContext())
 
 	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
 		metricsHandler(w, r, exporterConfig, logger)
