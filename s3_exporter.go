@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 const (
@@ -190,6 +191,65 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- s3CDSObjectTotal
 }
 
+func collectBucketSumMetrics(e *Exporter, bucket types.Bucket, ch chan<- prometheus.Metric) {
+	var bucketSize int64
+	var objectsCount uint32
+
+	logger := e.conf.logger
+	ctx := e.conf.ctx
+
+	query := &s3.ListObjectsV2Input{
+		Bucket: aws.String(*bucket.Name),
+	}
+
+	for {
+		resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
+		if err != nil {
+			level.Warn(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", *bucket.Name, "error", err.Error())
+			break
+		}
+
+		for _, item := range resp.Contents {
+			objectsCount++
+			bucketSize += item.Size
+		}
+
+		if resp.NextContinuationToken == nil {
+			level.Debug(logger).Log("msg", "all objects in bucket has been listed", "bucket", *bucket.Name)
+
+			break
+		}
+
+		query.ContinuationToken = resp.NextContinuationToken
+
+	}
+
+	ch <- prometheus.MustNewConstMetric(
+		s3ObjectsTotal, prometheus.GaugeValue, float64(objectsCount), *bucket.Name,
+	)
+	ch <- prometheus.MustNewConstMetric(
+		s3SumSize, prometheus.GaugeValue, float64(bucketSize), *bucket.Name,
+	)
+
+}
+
+func collectSumMetrics(e *Exporter, ch chan<- prometheus.Metric) {
+	logger := e.conf.logger
+	ctx := e.conf.ctx
+
+	inputList := &s3.ListBucketsInput{}
+	bucketsList, err := e.conf.s3Client.ListBuckets(ctx, inputList)
+
+	if err != nil {
+		level.Error(logger).Log("msg", "error retrieving buckets", "err", err.Error())
+	}
+
+	for _, bucket := range bucketsList.Buckets {
+		go collectBucketSumMetrics(e, bucket, ch)
+	}
+
+}
+
 // Collect metrics
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	level.Debug(e.conf.logger).Log("msg", "starting collection")
@@ -217,6 +277,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	logger := e.conf.logger
 	ctx := e.conf.ctx
 
+	collectSumMetrics(e, ch)
+
 	// Set timezone for file modification
 	timezone, _ := time.LoadLocation(e.conf.Timezone)
 	// Start processing cds objects
@@ -225,52 +287,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	reCdsSuff := regexp.MustCompile(`_.+\.[cg]ds$`)
 	reSinMatch := regexp.MustCompile(`^\d{3,5}$`)
 	startCollect := time.Now()
-
-	inputList := &s3.ListBucketsInput{}
-	bucketsList, err := e.conf.s3Client.ListBuckets(ctx, inputList)
-
-	if err != nil {
-		level.Error(logger).Log("msg", "error retrieving buckets", "err", err.Error())
-	}
-
-	for _, bucket := range bucketsList.Buckets {
-		var bucketSize int64
-		var objectsCount uint32
-
-		query := &s3.ListObjectsV2Input{
-			Bucket: aws.String(*bucket.Name),
-		}
-
-		for {
-			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
-			if err != nil {
-				level.Warn(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", *bucket.Name, "error", err.Error())
-				break
-			}
-
-			for _, item := range resp.Contents {
-				objectsCount++
-				bucketSize += item.Size
-			}
-
-			if resp.NextContinuationToken == nil {
-				level.Debug(logger).Log("msg", "all objects in bucket has been listed", "bucket", *bucket.Name)
-
-				break
-			}
-
-			query.ContinuationToken = resp.NextContinuationToken
-
-		}
-
-		ch <- prometheus.MustNewConstMetric(
-			s3ObjectsTotal, prometheus.GaugeValue, float64(objectsCount), *bucket.Name,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			s3SumSize, prometheus.GaugeValue, float64(bucketSize), *bucket.Name,
-		)
-
-	}
 
 	for _, cdsBucket := range e.conf.CdsBuckets {
 		cdsSize := make(map[CdsObject]int64)
