@@ -55,7 +55,7 @@ var (
 		"The size of the object that was modified most recently",
 		[]string{"bucket"}, nil,
 	)
-	s3ObjectTotal = prometheus.NewDesc(
+	s3ObjectsTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "objects_total"),
 		"The total number of objects for bucket",
 		[]string{"bucket"}, nil,
@@ -184,7 +184,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- s3ListDuration
 	ch <- s3LastModifiedObjectDate
 	ch <- s3LastModifiedObjectSize
-	ch <- s3ObjectTotal
+	ch <- s3ObjectsTotal
 	ch <- s3SumSize
 	ch <- s3BiggestSize
 	ch <- s3CDSObjectTotal
@@ -225,6 +225,52 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	reCdsSuff := regexp.MustCompile(`_.+\.[cg]ds$`)
 	reSinMatch := regexp.MustCompile(`^\d{3,5}$`)
 	startCollect := time.Now()
+
+	inputList := &s3.ListBucketsInput{}
+	bucketsList, err := e.conf.s3Client.ListBuckets(ctx, inputList)
+
+	if err != nil {
+		level.Error(logger).Log("msg", "error retrieving buckets", "err", err.Error())
+	}
+
+	for _, bucket := range bucketsList.Buckets {
+		var bucketSize int64
+		var objectsCount uint32
+
+		query := &s3.ListObjectsV2Input{
+			Bucket: aws.String(*bucket.Name),
+		}
+
+		for {
+			resp, err := e.conf.s3Client.ListObjectsV2(ctx, query)
+			if err != nil {
+				level.Warn(logger).Log("msg", "failed when listing s3 objects in bucket", "bucket", *bucket.Name, "error", err.Error())
+				break
+			}
+
+			for _, item := range resp.Contents {
+				objectsCount++
+				bucketSize += item.Size
+			}
+
+			if resp.NextContinuationToken == nil {
+				level.Debug(logger).Log("msg", "all objects in bucket has been listed", "bucket", *bucket.Name)
+
+				break
+			}
+
+			query.ContinuationToken = resp.NextContinuationToken
+
+		}
+
+		ch <- prometheus.MustNewConstMetric(
+			s3ObjectsTotal, prometheus.GaugeValue, float64(objectsCount), *bucket.Name,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			s3SumSize, prometheus.GaugeValue, float64(bucketSize), *bucket.Name,
+		)
+
+	}
 
 	for _, cdsBucket := range e.conf.CdsBuckets {
 		cdsSize := make(map[CdsObject]int64)
@@ -301,13 +347,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), cdsBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
-			s3ObjectTotal, prometheus.GaugeValue, float64(numberOfObjects), cdsBucket,
-		)
-		ch <- prometheus.MustNewConstMetric(
 			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), cdsBucket,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			s3SumSize, prometheus.GaugeValue, float64(totalSize), cdsBucket,
 		)
 
 		// Send all collected metrics in Prometheus registry
@@ -421,13 +461,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			s3LastModifiedObjectSize, prometheus.GaugeValue, float64(lastObjectSize), triggerBucket,
 		)
 		ch <- prometheus.MustNewConstMetric(
-			s3ObjectTotal, prometheus.GaugeValue, float64(numberOfObjects), triggerBucket,
-		)
-		ch <- prometheus.MustNewConstMetric(
 			s3BiggestSize, prometheus.GaugeValue, float64(biggestObjectSize), triggerBucket,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			s3SumSize, prometheus.GaugeValue, float64(totalSize), triggerBucket,
 		)
 	}
 
