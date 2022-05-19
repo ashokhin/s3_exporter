@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-kit/log"
@@ -191,9 +192,11 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- s3CDSObjectTotal
 }
 
-func collectBucketSumMetrics(e *Exporter, bucket types.Bucket, ch chan<- prometheus.Metric) {
+func collectBucketSumMetrics(e *Exporter, bucket types.Bucket, wg *sync.WaitGroup, ch chan<- prometheus.Metric) {
 	var bucketSize int64
 	var objectsCount uint32
+
+	defer wg.Done()
 
 	logger := e.conf.logger
 	ctx := e.conf.ctx
@@ -234,6 +237,8 @@ func collectBucketSumMetrics(e *Exporter, bucket types.Bucket, ch chan<- prometh
 }
 
 func collectSumMetrics(e *Exporter, ch chan<- prometheus.Metric) {
+	var wg sync.WaitGroup
+
 	logger := e.conf.logger
 	ctx := e.conf.ctx
 
@@ -245,7 +250,8 @@ func collectSumMetrics(e *Exporter, ch chan<- prometheus.Metric) {
 	}
 
 	for _, bucket := range bucketsList.Buckets {
-		go collectBucketSumMetrics(e, bucket, ch)
+		wg.Add(1)
+		go collectBucketSumMetrics(e, bucket, &wg, ch)
 	}
 
 }
