@@ -24,20 +24,16 @@ make
 ## Flags
 
 ```
-  -h, --help              Show context-sensitive help (also try --help-long and --help-man).
+  -h, --help                     Show context-sensitive help (also try --help-long and --help-man).
       --web.listen-address=":9340"
-                          Address to listen on for web interface and telemetry.
+                                 Address to listen on for web interface and telemetry.
       --web.metrics-path="/metrics"
-                          Path under which to expose metrics
-      --exporter-config-file="./config.yml"
-                          Path to exporter config file
-      --log.level="info"  Only log messages with the given severity or above. Valid levels: [debug, info, warn, error, fatal]
-      --log.format="logger:stderr"
-                          Set the log target and format. Example: "logger:syslog?appname=bob&local=7" or "logger:stdout?json=true"
-      --version           Show application version.
+                                 Path under which to expose metrics
+      --exporter-config-file=""  Path to exporter config file
+      --log.level=info           Only log messages with the given severity or above. One of: [debug, info, warn, error]
+      --log.format=logfmt        Output format of log messages. One of: [logfmt, json]
+      --version                  Show application version.
 ```
-
-Flags can also be set as environment variables, prefixed by `s3_exporter_`. For example: `s3_exporter_S3_ENDPOINT_URL=http://s3.example.local`.
 
 ## Metrics
 
