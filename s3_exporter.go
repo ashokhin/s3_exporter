@@ -252,8 +252,9 @@ func collectSumMetrics(e *Exporter, ch chan<- prometheus.Metric) {
 	for _, bucket := range bucketsList.Buckets {
 		wg.Add(1)
 		go collectBucketSumMetrics(e, bucket, &wg, ch)
-		wg.Wait()
 	}
+
+	wg.Wait()
 
 }
 
