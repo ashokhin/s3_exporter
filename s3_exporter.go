@@ -236,8 +236,10 @@ func collectBucketSumMetrics(e *Exporter, bucket types.Bucket, wg *sync.WaitGrou
 
 }
 
-func collectSumMetrics(e *Exporter, ch chan<- prometheus.Metric) {
+func (e *Exporter) CollectSumMetrics(ch chan<- prometheus.Metric, wg_sum *sync.WaitGroup) {
 	var wg sync.WaitGroup
+
+	defer wg_sum.Done()
 
 	logger := e.conf.logger
 	ctx := e.conf.ctx
@@ -275,6 +277,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	var (
+		wg_sum            sync.WaitGroup
 		lastModified      time.Time
 		numberOfObjects   uint32
 		totalSize         int64
@@ -285,7 +288,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	logger := e.conf.logger
 	ctx := e.conf.ctx
 
-	collectSumMetrics(e, ch)
+	wg_sum.Add(1)
+	go e.CollectSumMetrics(ch, &wg_sum)
+	defer wg_sum.Wait()
 
 	// Set timezone for file modification
 	timezone, _ := time.LoadLocation(e.conf.Timezone)
