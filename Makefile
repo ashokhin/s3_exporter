@@ -1,19 +1,19 @@
-GOPATH      := $(shell go env GOPATH)
+GOPATH					:= $(shell go env GOPATH)
 
-BIN_DIR             ?= $(shell pwd)/bin
-BIN_NAME            ?= s3_exporter$(shell go env GOEXE)
-DOCKER_IMAGE_NAME   ?= s3-exporter
-DOCKER_IMAGE_TAG    ?= $(subst /,-,$(shell git rev-parse --abbrev-ref HEAD))
+BIN_DIR					?= $(shell pwd)/bin
+BIN_NAME				?= s3_exporter$(shell go env GOEXE)
+DOCKER_IMAGE_NAME		?= s3-exporter
+DOCKER_IMAGE_TAG		?= $(subst /,-,$(shell git rev-parse --abbrev-ref HEAD))
 
 # Race detector is only supported on amd64.
 RACE := $(shell test $$(go env GOARCH) != "amd64" || (echo "-race"))
 
-export APP_HOST        ?= $(shell hostname)
-export APP_BRANCH      ?= $(shell git describe --all --contains --dirty HEAD)
-export APP_VERSION     := $(shell cat VERSION)
-export APP_REVISION    := $(shell git rev-parse HEAD)
-export APP_USER        := $(shell id -u --name)
-export APP_BUILD_DATE  := $(shell date '+%Y%m%d-%H:%M:%S')
+export APP_HOST			?= $(shell hostname)
+export APP_BRANCH		?= $(shell git describe --all --contains --dirty HEAD)
+export APP_VERSION		:= $(shell basename ${APP_BRANCH})
+export APP_REVISION		:= $(shell git rev-parse HEAD)
+export APP_USER			:= $(shell id -u --name)
+export APP_BUILD_DATE	:= $(shell date -u '+%Y-%m-%dT%H:%M:%S,%N%:z')
 
 all: clean format vet build test
 

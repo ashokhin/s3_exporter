@@ -1,0 +1,79 @@
+name: Release tags
+
+on:
+  push:
+    tags:
+      - v*
+
+jobs:
+
+  build:
+    name: Build, test, upload assets
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.18
+
+    - name: Build
+      run: make
+    
+    - name: Check version
+      run: |
+        chmod +x ./s3_exporter
+        ./s3_exporter --version
+
+    - name: Create archive with binary
+      run: tar -cvzf s3_exporter.tar.gz s3_exporter
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build
+        path: s3_exporter.tar.gz
+
+  release:
+    name: Create GitHub release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Create release name
+      id: release_meta
+      run: |
+        tag=$(basename "${{ github.ref }}")
+        rel_date=$(date -u '+%F')
+        rel_name="${rel_date} / ${tag}"
+        echo "::set-output name=tag::$tag"
+        echo "::set-output name=rel_name::$rel_name"
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: build
+    
+    - name: Create release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.release_meta.outputs.tag }}
+        release_name: ${{ steps.release_meta.outputs.rel_name }}
+        draft: false
+        prerelease: false
+
+    - name: Upload build
+      id: upload_build
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./s3_exporter.tar.gz
+        asset_name: s3_exporter-${{ steps.release_meta.outputs.tag }}-linux-amd64.tar.gz
+        asset_content_type: application/gzip
+
