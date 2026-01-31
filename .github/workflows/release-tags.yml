@@ -51,7 +51,7 @@ jobs:
         echo "::set-output name=rel_name::$rel_name"
 
     - name: Download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: build
     
